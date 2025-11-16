@@ -1,4 +1,5 @@
-;
+;24L-0698 Haajra Mumtaz
+;24L-0522 Adeena Fatima
 [org 0x0100]
 jmp start
 
@@ -13,6 +14,12 @@ score_value db '4420', 0
 speed_text db 'Speed', 0
 fuel_text db 'Fuel', 0
 
+car_row db 20           ; Default car row position
+car_col db 24           ; Default car column position
+    
+
+temp_row db 1         ; Temporary storage for calculations
+temp_col db 1
 ; write_char: Write a character at (x,y) with color
 ; Input: AL = character, BL = color, DH = row, DL = column
 write_char:
@@ -171,70 +178,84 @@ draw_lane_dividers:
 		ret
 
 ; draw_player_car: Draw player's car at bottom center
-draw_player_car:
+
+	draw_player_car:
     pusha
+    ;ideally at row 20-22 i.e center 
+    ; Load car position from memory
+    mov dh, [car_row]       ; Get car row position
+    mov dl, [car_col]       ; Get car column position
     
-    ; Car at row 20-22, column 24-27 (middle lane)
+    ; Save base position
+    mov [temp_row], dh
+    mov [temp_col], dl
     
-    ; Roof (row 20)
-    mov dh, 20
-    mov dl, 25
+    ; Roof (top row, 2 blocks wide, centered)
+    mov dh, [temp_row]
+    mov dl, [temp_col]
+    inc dl                  ; Center the roof (offset +1)
     mov al, 0xDF            ; ▀
     mov bl, 0x4C            ; Red
     call write_char
-    mov dl, 26
+    inc dl
     call write_char
     
-    ; Body (row 21)
-    mov dh, 21
-    mov dl, 24
+    ; Body (middle row, 4 blocks wide)
+    mov dh, [temp_row]
+    inc dh                  ; Next row
+    mov dl, [temp_col]
     mov al, 0xDB            ; █
     mov bl, 0x4C            ; Red
     call write_char
-    mov dl, 25
+    inc dl
     call write_char
-    mov dl, 26
+    inc dl
     call write_char
-    mov dl, 27
+    inc dl
     call write_char
     
-    ; Bottom (row 22)
-    mov dh, 22
-    mov dl, 24
+    ; Bottom (bottom row, 4 blocks wide)
+    mov dh, [temp_row]
+    add dh, 2               ; Bottom row
+    mov dl, [temp_col]
     mov al, 0xDC            ; ▄
     mov bl, 0x40            ; Black on red
     call write_char
-    mov dl, 25
+    inc dl
     mov al, 0xDC
     mov bl, 0x4C
     call write_char
-    mov dl, 26
+    inc dl
     call write_char
-    mov dl, 27
+    inc dl
     mov al, 0xDC
     mov bl, 0x40
     call write_char
     
-    ; Windshield
-    mov dh, 21
-    mov dl, 25
+    ; Windshield (middle row, 2 blocks centered)
+    mov dh, [temp_row]
+    inc dh
+    mov dl, [temp_col]
+    inc dl                  ; Offset +1
     mov al, 0xB1            ; ▒
     mov bl, 0x49            ; Light blue on red
     call write_char
-    mov dl, 26
+    inc dl
     call write_char
     
-    ; Headlights
-    mov dh, 20
-    mov dl, 24
+    ; Headlights (top row, corners)
+    mov dh, [temp_row]
+    mov dl, [temp_col]
     mov al, 0xFE            ; ■
     mov bl, 0x4F            ; White on red
     call write_char
-    mov dl, 27
+    add dl, 3               ; Right side
     call write_char
     
     popa
     ret
+
+
 
 ; draw_opponent_car: Draw opponent car in left lane
 draw_opponent_car:
@@ -301,7 +322,100 @@ draw_opponent_car:
     
     popa
     ret
-	
+	; move_car: Animate player car moving from bottom to top continuously
+move_car:
+    pusha
+    
+move_car_loop:
+    ; Clear the car at current position by redrawing background
+    call clear_car_area
+    
+    ; Move car up one row
+    mov al, [car_row]
+    dec al                  ; Move up
+    mov [car_row], al
+    
+    ; Check if car reached top (row 2)
+    cmp al, -2
+    jle reset_car_position
+    
+    jmp continue_move
+    
+reset_car_position:
+    ; Reset car to bottom (row 20)
+    mov byte [car_row], 28
+    
+continue_move:
+    ; Redraw background elements where car was
+	; divider redraw will be handled here
+    
+    ; Draw car at new position
+    call draw_player_car
+    
+    ; Delay for animation
+    call delay
+    ;collission wil be checked here
+    jmp move_car_loop        ; If no key pressed, continue
+    
+    
+    popa
+    ret
+
+; clear_car_area: Clear the area where car is currently located
+clear_car_area:
+    pusha
+    
+
+    ; Car is 3 rows tall, 4 columns wide
+    mov dh, [car_row]       ; Top row of car
+    mov dl, [car_col]       ; Left column of car
+    
+    ; Clear 3 rows
+    mov cx, 3
+clear_row_loop:
+    push cx
+    push dx
+    
+    ; Clear 4 columns in this row
+    mov cx, 4
+clear_col_loop:
+    ; Draw road surface character
+    mov al, 0xB0            ; ░ road texture
+    mov bl, 0x08            ; Dark gray
+    call write_char
+    inc dl
+    loop clear_col_loop
+    
+    pop dx
+    inc dh                  ; Next row
+    pop cx
+    loop clear_row_loop
+    
+    popa
+    ret
+    
+    popa
+    ret
+
+; delay: Create delay for animation
+delay:
+    pusha
+    mov cx, 0x02            ; Outer loop count (adjust for speed)
+    
+outer_delay:
+    push cx
+    mov cx, 0xFFFF          ; Inner loop count
+    
+inner_delay:
+    nop
+    nop
+    loop inner_delay
+    
+    pop cx
+    loop outer_delay
+    
+    popa
+    ret
 print_text:
 		push bp
 		pusha
@@ -493,7 +607,7 @@ draw_speed_fuel_bars:
 			mov cx,3
 			jmp top_line
 			; Top-right corner (row 16, col 60)
-			.next
+			.next:
 			mov dl, 60
 			mov al, 0xBF            ; ┐ rounded top-right corner
 			mov bl, 0x06
@@ -597,8 +711,6 @@ drawBg:
     ; Draw opponent car (draw first so player appears in front)
     call draw_opponent_car
     
-    ; Draw player car
-    call draw_player_car
 	
 	ret
 
@@ -607,9 +719,10 @@ start:
     ; Set text mode 80x25
     mov ax, 0x0003
     int 0x10
-    
-	
     call drawBg
+    ; Animate car movement
+    call move_car
+
     
     ; Terminate
     mov ax, 0x4c00
