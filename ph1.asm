@@ -13,11 +13,14 @@ score_text db 'Score', 0
 score_value db '4420', 0
 speed_text db 'Speed', 0
 fuel_text db 'Fuel', 0
-
+divider_offset db 0
 car_row db 20           ; Default car row position
 car_col db 24           ; Default car column position
-    
-
+carD_col: dw 15
+carD_row:  db 18
+   
+road_corners: dw 16, 26
+apparent_road_corners: dw 16, 26
 temp_row db 1         ; Temporary storage for calculations
 temp_col db 1
 ; write_char: Write a character at (x,y) with color
@@ -258,146 +261,84 @@ draw_lane_dividers:
 
 
 ; draw_opponent_car: Draw opponent car in left lane
+; draw_opponent_car: Draw opponent car in left lane
 draw_opponent_car:
     pusha
+    ;ideally at row 20-22 i.e center 
+    ; Load car position from memory
+    mov dh, [carD_row]       ; Get car row position
+    mov dl, [carD_col]       ; Get car column position
     
-    ; Car at row 12-14, column 15-18 (left lane)
+    ; Save base position
+    mov [temp_row], dh
+    mov [temp_col], dl
     
-    ; Roof (row 12)
-    mov dh, 12
-    mov dl, 16
+    ; Roof (top row, 2 blocks wide, centered)
+    mov dh, [temp_row]
+    mov dl, [temp_col]
+    inc dl                  ; Center the roof (offset +1)
     mov al, 0xDF            ; ▀
-    mov bl, 0x6E            ; Yellow
+    mov bl, 0x6e          ; yellow
     call write_char
-    mov dl, 17
+    inc dl
     call write_char
     
-    ; Body (row 13)
-    mov dh, 13
-    mov dl, 15
+    ; Body (middle row, 4 blocks wide)
+    mov dh, [temp_row]
+    inc dh                  ; Next row
+    mov dl, [temp_col]
     mov al, 0xDB            ; █
-    mov bl, 0x6E            ; Yellow
+    mov bl, 0x4C            ; Red
     call write_char
-    mov dl, 16
+    inc dl
     call write_char
-    mov dl, 17
+    inc dl
     call write_char
-    mov dl, 18
+    inc dl
     call write_char
     
-    ; Bottom (row 14)
-    mov dh, 14
-    mov dl, 15
+    ; Bottom (bottom row, 4 blocks wide)
+    mov dh, [temp_row]
+    add dh, 2               ; Bottom row
+    mov dl, [temp_col]
     mov al, 0xDC            ; ▄
-    mov bl, 0x60            ; Black on yellow
+    mov bl, 0x6E            ; Black on red
     call write_char
-    mov dl, 16
+    inc dl
     mov al, 0xDC
-    mov bl, 0x6E
+    mov bl, 0x6e
     call write_char
-    mov dl, 17
+    inc dl
     call write_char
-    mov dl, 18
+    inc dl
     mov al, 0xDC
     mov bl, 0x60
     call write_char
     
-    ; Windshield
-    mov dh, 13
-    mov dl, 16
+    ; Windshield (middle row, 2 blocks centered)
+    mov dh, [temp_row]
+    inc dh
+    mov dl, [temp_col]
+    inc dl                  ; Offset +1
     mov al, 0xB1            ; ▒
-    mov bl, 0x69            ; Light blue on yellow
+    mov bl, 0x69        ; Light blue on red
     call write_char
-    mov dl, 17
+    inc dl
     call write_char
     
-    ; Headlights
-    mov dh, 12
-    mov dl, 15
+    ; Headlights (top row, corners)
+    mov dh, [temp_row]
+    mov dl, [temp_col]
     mov al, 0xFE            ; ■
-    mov bl, 0x6F            ; White on yellow
+    mov bl, 0x6f        ; White on red
     call write_char
-    mov dl, 18
+    add dl, 3               ; Right side
     call write_char
     
     popa
     ret
 	; move_car: Animate player car moving from bottom to top continuously
-move_car:
-    pusha
-    
-move_car_loop:
-    ; Clear the car at current position by redrawing background
-    call clear_car_area
-    
-    ; Move car up one row
-    mov al, [car_row]
-    dec al                  ; Move up
-    mov [car_row], al
-    
-    ; Check if car reached top (row 2)
-    cmp al, -2
-    jle reset_car_position
-    
-    jmp continue_move
-    
-reset_car_position:
-    ; Reset car to bottom (row 20)
-    mov byte [car_row], 28
-    
-continue_move:
-    ; Redraw background elements where car was
-	; divider redraw will be handled here
-    
-    ; Draw car at new position
-    call draw_player_car
-    
-    ; Delay for animation
-    call delay
-    ;collission wil be checked here
-    jmp move_car_loop        ; If no key pressed, continue
-    
-    
-    popa
-    ret
 
-; clear_car_area: Clear the area where car is currently located
-clear_car_area:
-    pusha
-    
-
-    ; Car is 3 rows tall, 4 columns wide
-    mov dh, [car_row]       ; Top row of car
-    mov dl, [car_col]       ; Left column of car
-    
-    ; Clear 3 rows
-    mov cx, 3
-clear_row_loop:
-    push cx
-    push dx
-    
-    ; Clear 4 columns in this row
-    mov cx, 4
-clear_col_loop:
-    ; Draw road surface character
-    mov al, 0xB0            ; ░ road texture
-    mov bl, 0x08            ; Dark gray
-    call write_char
-    inc dl
-    loop clear_col_loop
-    
-    pop dx
-    inc dh                  ; Next row
-    pop cx
-    loop clear_row_loop
-    
-    popa
-    ret
-    
-    popa
-    ret
-
-; delay: Create delay for animation
 delay:
     pusha
     mov cx, 0x02            ; Outer loop count (adjust for speed)
@@ -713,16 +654,191 @@ drawBg:
     
 	
 	ret
+RANDNUM:
 
+   push bp
+   mov bp,sp
+   push ax
+   push cx
+   push dx
+   push bx
+   
+   MOV AH, 00h  ; interrupts to get system time        
+   INT 1AH      ; CX:DX now hold number of clock ticks since midnight      
+   mov  ax, dx
+   mov bx, 25173          
+   mul bx
+   add ax, 13849                    
+   xor  dx, dx
+   mov  cx, [bp+4]
+   shr  ax,5 
+   inc cx   
+   div  cx
+   mov [bp+6], dx
+   pop bx
+   pop dx
+   pop cx
+   pop ax
+   pop bp   
+   ret 2
+;will be used to randomize the cols of danger car on road
+randomize_danger_car:
+	push bp
+	mov bp, sp
+	push es
+	push ax
+	push bx
+	push cx
+	push di
+	
+	push 0
+	mov ax, 8
+	push ax
+	call RANDNUM
+	pop ax
+	mov dx, [apparent_road_corners]
+	add ax, dx
+	mov [carD_col], ax
+	add ax, 1
+	mov [carD_col+2], ax
+	add ax, 1 
+	mov [carD_col+4], ax
+	pop di
+	pop cx
+	pop bx
+	pop ax
+	pop es
+	pop bp
+	
+	ret
+; scrollbg: Animate road scrolling continuously
+scrollbg:
+    pusha
+    
+    ; Draw static background elements once
+    call draw_black_after_road
+    call draw_brown_rectangle
+    call draw_score_boxes
+    call draw_speed_fuel_bars
+	call randomize_danger_car
+    call draw_opponent_car
+    
+    mov byte [divider_offset], 0    ; Initialize offset
+    
+scrollLoop:
+    ; Draw road surface
+    call draw_road
+    
+    ; Draw dividers with current offset
+    mov al, [divider_offset]
+    call draw_lane_dividers_scroll
+    
+    ; Draw player car (stays static at fixed position)
+	
+    call draw_player_car
+	call draw_opponent_car
+    ; Small delay for animation
+    call delay
+    
+    ; Update offset for next frame
+    mov al, [divider_offset]
+    inc al
+    cmp al, 4               ; Reset after 4 (divider pattern repeats every 4 rows)
+    jb .no_reset
+    xor al, al
+.no_reset:
+    mov [divider_offset], al
+    
+    ; Check for keypress to exit
+    mov ah, 0x01
+    int 0x16
+    jz scrollLoop
+    
+    ; Clear keyboard buffer
+    mov ah, 0x00
+    int 0x16
+    
+    popa
+    ret
+
+; draw_lane_dividers_scroll: Draw dividers with scrolling offset
+; Input: AL = offset (0-3)
+draw_lane_dividers_scroll:
+    pusha
+    
+    mov bl, al              ; Save offset in BL
+    mov dh, 0               ; Start from top row
+    
+lane_scroll_loop:
+    cmp dh, 24
+    ja lane_scroll_done
+    
+    ; Calculate if this row should have a dash
+    ; Add current row to offset, then check pattern
+    mov al, dh
+    add al, bl              ; Add offset
+    and al, 3               ; Modulo 4
+    cmp al, 0
+    je draw_scroll_dash
+    cmp al, 1
+    je draw_scroll_dash
+    jmp skip_scroll_dash
+    
+draw_scroll_dash:
+    ; Left lane divider at column 21
+    mov dl, 21
+    mov al, 0xB3            ; │ vertical line
+    push bx
+    mov bl, 0x0E            ; Yellow
+    call write_char
+    pop bx
+    
+    ; Right lane divider at column 30
+    mov dl, 30
+    mov al, 0xB3
+    push bx
+    mov bl, 0x0E
+    call write_char
+    pop bx
+    
+skip_scroll_dash:
+    inc dh
+    jmp lane_scroll_loop
+    
+lane_scroll_done:
+    popa
+    ret
+
+; delay_short: Short delay for smooth animation
+delay_short:
+    pusha
+    mov cx, 0x01            ; Outer loop (reduce for faster scrolling)
+    
+outer_delay_short:
+    push cx
+    mov cx, 0x4000          ; Inner loop
+    
+inner_delay_short:
+    nop
+    loop inner_delay_short
+    
+    pop cx
+    loop outer_delay_short
+    
+    popa
+    ret
 ; ========== MAIN PROGRAM ==========
 start:
     ; Set text mode 80x25
     mov ax, 0x0003
     int 0x10
+    
+    ; Start scrolling animation (road moves, car stays static)
+    call scrollbg
+    
+    ; After user presses key, redraw final static scene
     call drawBg
-    ; Animate car movement
-    call move_car
-
+    call draw_player_car
     
     ; Terminate
     mov ax, 0x4c00
