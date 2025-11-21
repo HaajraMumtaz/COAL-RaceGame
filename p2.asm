@@ -57,19 +57,15 @@ score_label: db 'YOUR SCORE: ', 0
 play_again: db 'P - Play Again', 0
 exit_game: db 'ESC - Exit Game', 0
 decoration: db '================================', 0
-
 ; Sample score
 totalscore: dw 1234
-
 ; Keyboard status
 bool_end_status: db 0  ; 0=waiting, 1=play again, 2=terminate
-
 ; Old ISR storage
 oldisr: dd 0
-
 ; Current row for curtain effect
 current_row: db 0
-
+restart_msg: db 'Restarting game...', 0
 
 
 [org 0x0100]
@@ -277,7 +273,163 @@ fill_region:
 		pop si
 		popa
 		ret
+print_string_color:
+    push bp
+    mov bp, sp
+    push es
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    
+    mov ax, 0xb800
+    mov es, ax
+    
+    ; Calculate position
+    mov ax, [bp+10]     ; row
+    mov cx, 80
+    mul cx
+    add ax, [bp+8]      ; col
+    shl ax, 1
+    mov di, ax
+    
+    mov si, [bp+4]      ; string address
+    mov ah, [bp+6]      ; color attribute
+    
+    print_loop2:
+        lodsb
+        cmp al, 0
+        je print_done2
+        stosw
+        jmp print_loop2
+    
+    print_done2:
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    pop es
+    pop bp
+    ret 8
 
+; Print number at position
+; Input: row @8, col @6, number @4
+print_number_at:
+    push bp
+    mov bp, sp
+    push es
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    
+    mov ax, 0xb800
+    mov es, ax
+    
+    ; Calculate position
+    mov ax, [bp+8]      ; row
+    mov bx, 80
+    mul bx
+    add ax, [bp+6]      ; col
+    shl ax, 1
+    mov di, ax
+    
+    mov ax, [bp+4]      ; number
+    mov bx, 10
+    mov cx, 0
+    
+    nextdigit:
+        mov dx, 0
+        div bx
+        add dl, 0x30
+        push dx
+        inc cx
+        cmp ax, 0
+        jnz nextdigit
+    
+    nextpos: 
+        pop dx
+        mov dh, 0x0E    ; yellow on black
+        mov [es:di], dx
+        add di, 2
+        loop nextpos
+    
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop es
+    pop bp
+    ret 6
+	
+	;------------------------------------------------------interrupt andling----------------------------------------------------------------------
+	
+; Keyboard ISR
+kbisr:
+    push ax
+    
+    in al, 0x60 
+    
+    cmp al, 25          ; P key (scancode for P)
+    jne nextcmp 
+    mov byte [bool_end_status], 1
+    jmp nomatch
+    
+    nextcmp: 
+    cmp al, 1           ; Esc key
+    jne nomatch 
+    mov byte [bool_end_status], 2
+    
+    nomatch: 
+    pop ax
+    jmp far [cs:oldisr]
+
+; Hook keyboard interrupt
+hook_kbisr:
+    push es
+    push ax
+    
+    xor ax, ax
+    mov es, ax
+    mov ax, [es:9*4]
+    mov [oldisr], ax
+    mov ax, [es:9*4+2]
+    mov [oldisr+2], ax
+    
+    cli
+    mov word [es:9*4], kbisr
+    mov [es:9*4+2], cs
+    sti
+    
+    pop ax
+    pop es
+    ret
+
+; Unhook keyboard interrupt
+unhook_kbisr:
+    push es
+    push ax
+    push bx
+    
+    xor ax, ax
+    mov es, ax
+    mov ax, [oldisr]
+    mov bx, [oldisr+2]
+    
+    cli
+    mov [es:9*4], ax
+    mov [es:9*4+2], bx
+    sti
+    
+    pop bx
+    pop ax
+    pop es
+    ret
+	
 ; ============================================
 ; SUBROUTINE: Print String
 ; Input: DH=row, DL=column, SI=string, BL=attribute
@@ -2177,18 +2329,268 @@ scrollLoop:
     
     popa
     ret
+;--------------------------------------------------------------------------end Screen----------------------------------------------------------------------------------------------------------
+curtain_delay:
+    push cx
+    push ax
+    mov cx, 0x00FF
+    delay_outer:
+        mov ax, 0x00FF
+        delay_inner:
+            dec ax
+            jnz delay_inner
+        loop delay_outer
+    pop ax
+    pop cx
+    ret
+
+; Fill a single row with spaces (for curtain effect)
+; Input: row number in AL
+fill_row:
+    push es
+    push ax
+    push bx
+    push cx
+    push di
+    
+    push 0
+	push 0
+	mov ax,0
+	push ax
+	call get_pixel
+    pop di
+    mov ax, 0xb800
+    mov es, ax
+    
+    mov cx, 80
+    mov ax, 0x0720      ; space with white on black
+    fill_row_loop:
+        mov [es:di], ax
+        add di, 2
+        loop fill_row_loop
+    
+    pop di
+    pop cx
+    pop bx
+    pop ax
+    pop es
+    ret
 	
+screenEndprep:
+    push bp
+    mov bp, sp
+    push ax
+    
+    ; Row 0-2: empty rows with curtain effect
+    mov al, 0
+    call fill_row
+    call curtain_delay
+    mov al, 1
+    call fill_row
+    call curtain_delay
+    mov al, 2
+    call fill_row
+    call curtain_delay
+    
+    ; Row 3: line1
+    mov al, 3
+    call fill_row
+	mov dh,3
+    mov dl,8
+    mov si, line1
+    call print_string
+    call curtain_delay
+    
+    ; Row 4: line2
+    mov al, 4
+    call fill_row
+    mov dh, 4
+    mov dl, 8
+    mov si, line2
+    call print_string
+    call curtain_delay
+    
+    ; Row 5: line3
+    mov al, 5
+    call fill_row
+    mov dh,5
+    mov dl, 8
+    mov si,line3
+    call print_string
+    call curtain_delay
+    
+    ; Row 6: line4
+    mov al, 6
+    call fill_row
+    mov dh,6
+    mov dl,4
+    mov si,line4
+    call print_string
+    call curtain_delay
+    
+    ; Row 7: line5
+    mov al, 7
+    call fill_row
+    mov dh,7
+    mov dl, 8
+    mov si, line5
+    call print_string
+    call curtain_delay
+    
+    ; Row 8: line6
+    mov al, 8
+    call fill_row
+    mov dh, 8
+    mov dl, 8
+    mov si, line6
+    call print_string
+    call curtain_delay
+    
+    ; Row 9: line7
+    mov al, 9
+    call fill_row
+    mov dh, 9
+    mov dl, 8
+    mov si,line7
+    call print_string
+    call curtain_delay
+    
+    ; Row 10: empty
+    mov al, 10
+    call fill_row
+    call curtain_delay
+    
+    ; Row 11: decoration
+    mov al, 11
+    call fill_row
+    mov dh,11
+    mov dl,24
+    mov si, decoration
+    call print_string
+    call curtain_delay
+    
+    ; Row 12: empty
+    mov al, 12
+    call fill_row
+    call curtain_delay
+    
+    ; Row 13: score
+    mov al, 13
+    call fill_row
+    push 13
+    push 34
+    push 0x0E
+    push score_label
+    call print_string_color
+    push 13
+    push 46
+    push word [totalscore]
+    call print_number_at
+    call curtain_delay
+    
+    ; Row 14: empty
+    mov al, 14
+    call fill_row
+    call curtain_delay
+    
+    ; Row 15: decoration
+    mov al, 15
+    call fill_row
+    mov dh, 15
+    mov dl,24
+    mov si, decoration
+    call print_string
+    call curtain_delay
+    
+    ; Rows 16-20: empty
+    mov al, 16
+    call fill_row
+    call curtain_delay
+    mov al, 17
+    call fill_row
+    call curtain_delay
+    mov al, 18
+    call fill_row
+    call curtain_delay
+    mov al, 19
+    call fill_row
+    call curtain_delay
+    mov al, 20
+    call fill_row
+    call curtain_delay
+    
+    ; Row 21: play again
+    mov al, 21
+    call fill_row
+    push 21
+    push 28
+    push 0x0A
+    push play_again
+    call print_string_color
+    call curtain_delay
+    
+    ; Row 22: exit game
+    mov al, 22
+    call fill_row
+    push 22
+    push 28
+    push 0x0C
+    push exit_game
+    call print_string_color
+    call curtain_delay
+    
+    ; Rows 23-24: empty (complete the screen)
+    mov al, 23
+    call fill_row
+    call curtain_delay
+    mov al, 24
+    call fill_row
+    call curtain_delay
+    
+    pop ax
+    pop bp
+    ret
+
+screenEnd:
+	call clrscr
+    call hook_kbisr
+    call screenEndprep
+    wait_loop:
+        mov al, [bool_end_status]
+        cmp al, 0
+        je wait_loop
+    call unhook_kbisr
+    call clrscr
+    mov al, [bool_end_status]
+    cmp al, 1
+    je play_again_msg
+    cmp al, 2
+    je terminate
+    
+    play_again_msg:
+    ; Display restart message
+    push 12
+    push 30
+    push 0x0A       ; green
+    mov ax, restart_msg
+    push ax
+    call print_string_color
+    
+    call delay
+	
+	terminate:
+			ret
 ; ========== MAIN PROGRAM ==========
 start:
 
 	call screen1
-    call instructions_page
+    
 	call clrscr
+
     ; Start scrolling animation (road moves, car stays static)
-    call scrollbg
+  
     ; After user presses key, redraw final static scene
-    call drawBg
-    call draw_player_car
+    call screenEnd
     
     ; Terminate
     mov ax, 0x4c00
