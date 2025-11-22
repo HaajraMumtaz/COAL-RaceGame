@@ -30,7 +30,10 @@ blink_state db 1        ; 1 = visible, 0 = invisible
 temp_row db 1           ; Temporary storage for calculations
 temp_col db 1
 
-
+;flags + car movement
+car_move_left: db 0
+car_move_right: db 0
+car_speed: db 9       ; Pixels to move per frame (adjust for smoothness)
 ;=====================================================================================
 ; ASCII Art for GAME OVER (using text characters)
 line1:  db '  ####      #     #     # #####      ####  #     # ##### ####   ', 0
@@ -60,14 +63,17 @@ decoration: db '================================', 0
 ; Sample score
 totalscore: dw 1234
 ; Keyboard status
-bool_end_status: db 0  ; 0=waiting, 1=play again, 2=terminate
+screen_status: db 0  ;-1=first time 0=waiting, 1=play again, 2=terminate
 ; Old ISR storage
 oldisr: dd 0
 ; Current row for curtain effect
 current_row: db 0
 restart_msg: db 'Restarting game...', 0
-
-
+road_col:db 13,37
+game_paused db 0        ; 0 = not paused, 1 = paused
+exit_question db 'Do you want to exit?', 0
+yes_option db 'Yes', 0
+no_option db 'No', 0
 [org 0x0100]
 jmp start
 
@@ -366,27 +372,62 @@ print_number_at:
     pop bp
     ret 6
 	
-	;------------------------------------------------------interrupt andling----------------------------------------------------------------------
+	;------------------------------------------------------interrupt handling----------------------------------------------------------------------
 	
-; Keyboard ISR
 kbisr:
     push ax
     
     in al, 0x60 
+  
+    test al, 0x80
+    jnz key_release
     
-    cmp al, 25          ; P key (scancode for P)
-    jne nextcmp 
-    mov byte [bool_end_status], 1
-    jmp nomatch
+key_press:
+    cmp al, 0x4B        ; Left arrow pressed
+    je set_left
+    cmp al, 0x4D        ; Right arrow pressed
+    je set_right
+    cmp al, 0x01        ; ESC key scancode is 0x01, not 0x1b
+    je endPop
+    jmp kb_done         ; Add this to handle other keys
     
-    nextcmp: 
-    cmp al, 1           ; Esc key
-    jne nomatch 
-    mov byte [bool_end_status], 2
+key_release:
+    and al, 0x7F        ; Remove release bit    
+    cmp al, 0x4B        ; Left arrow released
+    je clear_left
+    cmp al, 0x4D        ; Right arrow released
+    je clear_right
+    jmp kb_done
     
-    nomatch: 
+set_left:
+    mov byte [car_move_left], 1
+    jmp kb_done
+    
+set_right:
+    mov byte [car_move_right], 1
+    jmp kb_done
+    
+clear_left:
+    mov byte [car_move_left], 0
+    jmp kb_done
+    
+endPop:
+    mov byte [screen_status], 1
+    mov byte [game_paused], 1
+    jmp kb_done         ; Must jump to kb_done!
+    
+clear_right:
+    mov byte [car_move_right], 0
+    jmp kb_done         ; Add explicit jump
+    
+kb_done:
+    ; Send EOI to PIC
+    mov al, 0x20
+    out 0x20, al
+    
     pop ax
-    jmp far [cs:oldisr]
+	jmp far[cs:oldisr]
+    iret                ; Use iret instead of jmp far for ISR
 
 ; Hook keyboard interrupt
 hook_kbisr:
@@ -2239,7 +2280,29 @@ inner_delay:
 ; update_blink: Update blinking state for coin car
 
 ; scrollbg: Animate road scrolling continuously with obstacle car and coin car
-
+update_car_position:
+    push ax
+    
+    ; Handle left movement
+    cmp byte [car_move_left], 1
+    jne check_right
+    cmp byte [car_col], 19
+    jbe check_right
+    mov al, [car_speed]
+    sub byte [car_col], al
+    
+check_right:
+    ; Handle right movement
+    cmp byte [car_move_right], 1
+    jne move_done
+    cmp byte [car_col], 29
+    jae move_done
+    mov al, [car_speed]
+    add byte [car_col], al
+    
+move_done:
+    pop ax
+    ret
 scrollbg:
     pusha
     ; Draw static background elements once
@@ -2261,71 +2324,186 @@ scrollbg:
     mov byte [blink_state], 1         ; Start with visible purple
     
 scrollLoop:
-    ; Draw road surface
+    ; Check if game is paused
+    cmp byte [game_paused], 1
+    je pause_loop
+    
     call draw_road
-
     mov al, [divider_offset]
     call draw_lane_dividers_scroll
-    
-    ; Draw obstacle car at current position (only if visible)
     call draw_obstacle_car
-    
-    ; Draw coin car at current position (with blinking purple windshield)
     call draw_coin_car
-    
-    ; Draw player car (stays static at fixed position)
+	call update_car_position
     call draw_player_car
-   
     
-    ; Toggle blink state
     xor byte [blink_state], 1
     
-    ; Small delay for animation
     call delay
     
-    ; Move obstacle car down (scrolling illusion)
     mov ax, [obstacle_car_row]
-    inc ax                      ; Move down by 1 row
+    inc ax
     mov [obstacle_car_row], ax
     
-    ; Check if obstacle car went completely off screen (past row 25)
     cmp ax, 29
     jl .obstacle_still_visible
     
-    ; Obstacle car went off screen - spawn new car at top with random lane
     call randomize_obstacle_car_lane
-    mov word [obstacle_car_row], -3   
+    mov word [obstacle_car_row], -3
     
 .obstacle_still_visible:
-    ; Move coin car down (scrolling illusion)
     mov ax, [coin_car_row]
-    inc ax                      ; Move down by 1 row
+    inc ax
     mov [coin_car_row], ax
     
-    ; Check if coin car went completely off screen (past row 25)
     cmp ax, 25
     jl .coin_still_visible
     
-    ; Coin car went off screen - spawn new car at top with random lane
     call randomize_coin_car_lane
-    mov word [coin_car_row], -3        ; Start 3 rows above screen for smooth entry
+    mov word [coin_car_row], -3
     
 .coin_still_visible:
-    ; Update offset for next frame
     mov al, [divider_offset]
     inc al
-    cmp al, 4               ; Reset after 4 (divider pattern repeats every 4 rows)
+    cmp al, 4
     jb .no_reset
     xor al, al
 .no_reset:
     mov [divider_offset], al
-
-
+    
+   cmp byte [game_paused], 1
+    je toggle_pause
     jmp scrollLoop
     
-    ; Clear keyboard buffer
+toggle_pause:
+    ; Toggle pause state
+    
+    ; If now paused, draw popup
+    cmp byte [game_paused], 1
+    jne scrollLoop
+    
+    ; Draw the pause popup
+    call draw_pause_popup
+    
+pause_loop:
+    ; Wait for keypress while paused
+    
+    
+    ; Get the key
     mov ah, 0x00
     int 0x16
+    
+    ; Check if 'y' or 'Y' was pressed to resume
+    cmp al, 'n'
+    je resume_game
+    cmp al, 'N'
+    je resume_game
+    
+    ; Check if 'n' or 'N' was pressed to exit
+    cmp al, 'y'
+    je exit
+    cmp al, 'Y'
+    je exit
+    
+    ; Any other key, keep waiting
+    jmp pause_loop
+exit:
+	call screenEnd
+	popa
+	ret
+resume_game:
+    ; Unpause - set flag to 0
+    mov byte [game_paused], 0
+    
+    ; Redraw background to remove popup
+    call draw_black_after_road
+    call draw_brown_rectangle
+    call draw_score_boxes
+    call draw_speed_fuel_bars
+    
+    jmp scrollLoop
+;-----------------------------------------------------------------------------Pause pop up-----------------------------------------------------
+; draw_pause_popup: Draw brown pause popup in center of screen
+draw_pause_popup:
+    pusha
+    
+    ; Draw brown rectangle in center (rows 7-17, cols 12-39)
+    mov dh, 7               ; Start row
+    mov dl, 12              ; Start col
+    mov ch, 17              ; End row
+    mov cl, 39              ; End col
+    mov al, ' '             ; Space character
+    mov bl, 0x66            ; Brown on brown
+    call fill_region
+    
+    ; Draw border - top edge
+    mov dh, 7
+    mov dl, 12
+    mov al, 0xC9            ; ╔ double top-left corner
+    mov bl, 0x06            ; Black on brown
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26              ; Width of top line
+draw_top_border:
+    mov al, 0xCD            ; ═ double horizontal
+    call write_char
+    inc dl
+    loop draw_top_border
+    
+    mov dl, 39
+    mov al, 0xBB            ; ╗ double top-right corner
+    call write_char
+    
+    ; Draw border - bottom edge
+    mov dh, 17
+    mov dl, 12
+    mov al, 0xC8            ; ╚ double bottom-left corner
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26
+draw_bottom_border:
+    mov al, 0xCD            ; ═ double horizontal
+    call write_char
+    inc dl
+    loop draw_bottom_border
+    
+    mov dl, 39
+    mov al, 0xBC            ; ╝ double bottom-right corner
+    call write_char
+    
+    ; Draw border - left and right edges
+    mov dh, 8
+    mov cx, 9               ; Height of side borders
+draw_side_borders:
+    mov dl, 12
+    mov al, 0xBA            ; ║ double vertical
+    call write_char
+    mov dl, 39
+    call write_char
+    inc dh
+    loop draw_side_borders
+    
+    ; Print "Do you want to exit?" text in black
+    mov dh, 10
+    mov dl, 16
+    mov bl, 0x60            ; Black on brown
+    mov si, exit_question
+    call print_string
+    
+    ; Print "Yes" option in black
+    mov dh, 13
+    mov dl, 20
+    mov bl, 0x60            ; Black on brown
+    mov si, yes_option
+    call print_string
+    
+    ; Print "No" option in black
+    mov dh, 13
+    mov dl, 30
+    mov bl, 0x60            ; Black on brown
+    mov si, no_option
+    call print_string
     
     popa
     ret
@@ -2556,12 +2734,12 @@ screenEnd:
     call hook_kbisr
     call screenEndprep
     wait_loop:
-        mov al, [bool_end_status]
+        mov al, [screen_status]
         cmp al, 0
         je wait_loop
     call unhook_kbisr
     call clrscr
-    mov al, [bool_end_status]
+    mov al, [screen_status]
     cmp al, 1
     je play_again_msg
     cmp al, 2
@@ -2584,11 +2762,14 @@ screenEnd:
 start:
 
 	call screen1
-    
+    call instructions_page
 	call clrscr
-
-    ; Start scrolling animation (road moves, car stays static)
-  
+	call drawBg
+	mov ah,0
+	int 16h
+	call hook_kbisr
+    ; Start scrolling animation (road moves, car stays static) once any key pressed
+    call scrollbg
     ; After user presses key, redraw final static scene
     call screenEnd
     
