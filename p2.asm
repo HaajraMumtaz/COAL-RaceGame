@@ -368,8 +368,41 @@ print_number_at:
     pop es
     pop bp
     ret 6
-	
-	;------------------------------------------------------interrupt handling----------------------------------------------------------------------
+	; delay: Create delay for animation
+	delay:
+		pusha
+		mov cx, 0x02            ; Outer loop count (adjust for speed)
+		
+	outer_delay:
+		push cx
+		mov cx, 0xFFF0          ; Inner loop count
+		
+	inner_delay:
+		nop
+		nop
+		nop
+		loop inner_delay
+		
+		pop cx
+		loop outer_delay
+		
+		popa
+		ret
+		
+	medium_delay:
+		push cx
+		push ax
+		mov cx, 0x7FFF
+	outer:
+		mov ax, 0x7FFF
+	inner:
+		dec ax
+		jnz inner
+		loop outer
+		pop ax
+		pop cx
+		ret
+		;------------------------------------------------------interrupt handling----------------------------------------------------------------------
 	
 kbisr:
     push ax
@@ -541,7 +574,7 @@ print_string:
     ret
 ;-----------------------------------------game reset-------------------------------------------------------------------
 set_game:
-	mov byte[replay],0
+	mov byte[replay],1
 	mov byte[game_paused],0
 	mov al,[default_row]
 	mov byte[car_row],al
@@ -2297,29 +2330,6 @@ lane_scroll_done:
     popa
     ret
 
-; delay: Create delay for animation
-delay:
-    pusha
-    mov cx, 0x02            ; Outer loop count (adjust for speed)
-    
-outer_delay:
-    push cx
-    mov cx, 0xFFFF          ; Inner loop count
-    
-inner_delay:
-    nop
-    nop
-    loop inner_delay
-    
-    pop cx
-    loop outer_delay
-    
-    popa
-    ret
-
-; update_blink: Update blinking state for coin car
-
-; scrollbg: Animate road scrolling continuously with obstacle car and coin car
 update_car_position:
     push ax
     
@@ -2839,6 +2849,7 @@ screenEnd:
 		call print_string_color
 		call delay
 		call delay
+		
 	terminate:
 		ret
 
@@ -2848,14 +2859,17 @@ start:
     call screen1
 	call instructions_page
 game:
-	call set_game
+	
 	push 0x0720
     call clrscr
     call drawBg
     call scrollbg  
     call screenEnd
 	cmp byte[replay],1
-	je game
+	jne endGame
+	call set_game
+	jmp game
+endGame:
 	push 0x0720
 	call clrscr
 	
