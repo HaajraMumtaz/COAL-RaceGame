@@ -43,7 +43,7 @@ replay:db 0
 line1:  db '  ####      #     #     # #####      ####  #     # ##### ####   ', 0
 line2:  db ' #    #    # #    ##   ## #         #    # #     # #     #   #  ', 0
 line3:  db ' #        #   #   # # # # #         #    # #     # #     #   #  ', 0
-line4:  db ' #  ###  #     #  #  #  # #####     #    # #     # ####  ####   ', 0
+line4:  db '     #  ###  #     #  #  #  # #####     #    # #     # ####  ####   ', 0
 line5:  db ' #    #  #######  #     # #         #    #  #   #  #     #   #  ', 0
 line6:  db ' #    #  #     #  #     # #         #    #  #   #  #     #    # ', 0
 line7:  db '  ####   #     #  #     # #####      ####    ###   ##### #    # ', 0
@@ -1460,6 +1460,8 @@ cont_delay_loop:
     ret
 ;--------------------------------------------------------------------------------------------Game screen----------------------------------------------------------------------------------------------------------
 ; draw_road: Draw straight road from top to bottom (full screen vertically)
+
+
 draw_road:
 		pusha
 		push si
@@ -1622,6 +1624,91 @@ draw_player_car:
     
     popa
     ret
+; Generic fade-out function for any car
+; Input: SI = pointer to car row variable
+;        DI = pointer to car column array
+;        BL = background color (0x02 for road)
+fade_out_car:
+    pusha
+    
+.fade_loop:
+    ; Get current car position
+    mov ax, [si]        ; Car row
+    mov dh, al          ; Row to clear
+    
+    ; Get first column from column array
+    push si
+    mov si, di          ; Point to column array
+    mov dl, [si]        ; First column
+    pop si
+    
+    ; Clear 3 rows x 4 columns
+    mov cx, 3           ; 3 rows for car height
+.clear_rows:
+    push cx
+    push dx
+    
+    mov cx, 4           ; 4 columns wide
+.clear_cols:
+    mov al, ' '
+    push bx
+    call write_char
+    pop bx
+    inc dl
+    loop .clear_cols
+    
+    pop dx
+    inc dh              ; Next row
+    pop cx
+    loop .clear_rows
+    
+    ; Move car down one row
+    mov ax, [si]
+    inc ax
+    mov [si], ax
+    
+    ; Small delay
+    push cx
+    mov cx, 0x0100
+.delay:
+    loop .delay
+    pop cx
+    
+    ; Check if completely off screen (row > 25)
+    cmp ax, 26
+    jl .fade_loop
+    
+    popa
+    ret
+fade_out_coin_car:
+    push si
+    push di
+    push bx
+    
+    mov si, coin_car_row
+    mov di, coin_car_col
+    mov bl, 0x02        ; Green road background
+    call fade_out_car
+    
+    pop bx
+    pop di
+    pop si
+    ret
+; Usage for obstacle car:
+fade_out_obstacle_car:
+    push si
+    push di
+    push bx
+    
+    mov si, carD_row
+    mov di, carD_col
+    mov bl, 0x02        ; Green road background
+    call fade_out_car
+    
+    pop bx
+    pop di
+    pop si
+    ret
 
 ; draw_obstacle_car: Draw regular obstacle car at current position
 ; Uses carD_col array for column positions and carD_row for row
@@ -1631,16 +1718,150 @@ draw_obstacle_car:
     
     ; Check if car is visible on screen (rows 0-22, need 3 rows for car)
     mov ax, [carD_row]
+    
+    ; Handle partial visibility
+    cmp ax, -2
+    je drawObstRow1Only      ; Only roof visible
+    cmp ax, -1
+    je drawObstRow1And2      ; Roof and body visible
     cmp ax, 0
-    jge .check_upper
-    jmp .not_visible
+    jge .check_upper         ; All rows potentially visible
+    jmp obs_not_visible         ; Completely off screen
+    
 .check_upper:
     cmp ax, 22
-    jle .draw_car
-    jmp .not_visible
+    jle draw_obs
+    jmp obs_not_visible
     
-.draw_car:
-    ; Get random column positions from carD_col array
+drawObstRow1Only:
+    ; Only draw roof when carD_row = -2
+    mov si, carD_col
+    mov bx, [si+2]      ; Second column
+    mov cx, [si+4]      ; Third column
+    
+    mov dh, 0           ; Row 0 on screen (carD_row + 2)
+    mov dl, bl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    ; Headlights
+    mov si, carD_col
+    mov dl, byte [si]
+    mov al, 0xFE
+    push bx
+    mov bl, 0x1F
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x1F
+    call write_char
+    pop bx
+    
+    jmp obs_not_visible
+    
+drawObstRow1And2:
+    ; Draw roof and body when carD_row = -1
+    mov si, carD_col
+    mov ax, [si]        ; First column
+    mov bx, [si+2]      ; Second column
+    mov cx, [si+4]      ; Third column
+    
+    ; Roof at row 0
+    mov dh, 0
+    mov dl, bl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    ; Headlights
+    mov dl, byte [carD_col]
+    mov al, 0xFE
+    push bx
+    mov bl, 0x1F
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x1F
+    call write_char
+    pop bx
+    
+    ; Body at row 1
+    mov dh, 1
+    mov dl, byte [carD_col]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov si, carD_col
+    mov dl, byte [si+2]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    ; Windshield
+    mov dl, byte [si+2]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x19
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x19
+    call write_char
+    pop bx
+    
+    jmp obs_not_visible
+    
+draw_obs:
+    ; Draw complete car (all 3 rows)
     mov si, carD_col
     mov ax, [si]        ; First column
     mov bx, [si+2]      ; Second column
@@ -1648,106 +1869,116 @@ draw_obstacle_car:
     
     ; Roof (row = carD_row)
     mov dh, byte [carD_row]
-    mov dl, bl          ; Middle column for roof start
-    mov al, 0xDF        ; ▀
-    push bx
-    mov bl, 0x1E        ; Blue
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column for roof end
+    mov dl, bl
+    mov al, 0xDF
     push bx
     mov bl, 0x1E
     call write_char
     pop bx
     
-    ; Body (row = carD_row+1)
-    inc dh
-    mov dl, byte [carD_col]
-    mov al, 0xDB        ; █
-    push bx
-    mov bl, 0x1E        ; Blue
-    call write_char
-    pop bx
-    mov dl, bl          ; Second column
-    mov al, 0xDB
-    push bx
-    mov bl, 0x1E
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xDB
-    push bx
-    mov bl, 0x1E
-    call write_char
-    pop bx
     mov dl, cl
-    inc dl              ; Fourth column
-    mov al, 0xDB
+    mov al, 0xDF
     push bx
     mov bl, 0x1E
     call write_char
     pop bx
     
-    ; Bottom (row = carD_row+2)
-    inc dh
+    ; Headlights
     mov dl, byte [carD_col]
-    mov al, 0xDC        ; ▄
-    push bx
-    mov bl, 0x10        ; Black on blue
-    call write_char
-    pop bx
-    mov dl, bl          ; Second column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x1E
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x1E
-    call write_char
-    pop bx
-    mov dl, cl
-    inc dl              ; Fourth column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x10
-    call write_char
-    pop bx
-    
-    ; Windshield (row = carD_row+1) - Regular light blue
-    dec dh
-    mov dl, bl          ; Second column
-    mov al, 0xB1        ; ▒
-    push bx
-    mov bl, 0x19        ; Light blue on blue
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xB1
-    push bx
-    mov bl, 0x19
-    call write_char
-    pop bx
-    
-    ; Headlights (row = carD_row)
-    dec dh
-    mov dl, byte [carD_col]
-    mov al, 0xFE        ; ■
-    push bx
-    mov bl, 0x1F        ; White on blue
-    call write_char
-    pop bx
-    mov dl, cl
-    inc dl              ; Fourth column
     mov al, 0xFE
     push bx
     mov bl, 0x1F
     call write_char
     pop bx
     
-.not_visible:
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x1F
+    call write_char
+    pop bx
+    
+    ; Body (row = carD_row+1)
+    mov dh, byte [carD_row]
+    inc dh
+    mov dl, byte [carD_col]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov si, carD_col
+    mov dl, byte [si+2]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDB
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    ; Windshield
+    mov dl, byte [si+2]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x19
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x19
+    call write_char
+    pop bx
+    
+    ; Bottom (row = carD_row+2)
+    mov dh, byte [carD_row]
+    add dh, 2
+    mov dl, byte [carD_col]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x10
+    call write_char
+    pop bx
+    
+    mov si, carD_col
+    mov dl, byte [si+2]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x1E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDC
+    push bx
+    mov bl, 0x10
+    call write_char
+    pop bx
+    
+obs_not_visible:
     pop si
     popa
     ret
@@ -1760,16 +1991,154 @@ draw_coin_car:
     
     ; Check if car is visible on screen (rows 0-22, need 3 rows for car)
     mov ax, [coin_car_row]
+    
+    ; Handle partial visibility
+    cmp ax, -2
+    je drawRow1Only      ; Only roof visible
+    cmp ax, -1
+    je drawRow1And2      ; Roof and body visible
     cmp ax, 0
-    jge .check_upper
-    jmp .not_visible
+    jge .check_upper     ; All rows potentially visible
+    jmp coin_not_visible ; Completely off screen
+    
 .check_upper:
     cmp ax, 22
-    jle .draw_car
-    jmp .not_visible
+    jle draw_coin
+    jmp coin_not_visible
     
-.draw_car:
-    ; Get random column positions from coin_car_col array
+drawRow1Only:
+    ; Only draw roof when car_row = -2
+    mov si, coin_car_col
+    mov bx, [si+2]      ; Second column
+    mov cx, [si+4]      ; Third column
+    
+    mov dh, 0           ; Row 0 on screen (coin_car_row + 2)
+    mov dl, bl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    ; Headlights
+    mov si, coin_car_col
+    mov dl, byte [si]
+    mov al, 0xFE
+    push bx
+    mov bl, 0x6F
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x6F
+    call write_char
+    pop bx
+    
+    jmp coin_not_visible
+    
+drawRow1And2:
+    ; Draw roof and body when car_row = -1
+    mov si, coin_car_col
+    mov ax, [si]        ; First column
+    mov bx, [si+2]      ; Second column
+    mov cx, [si+4]      ; Third column
+    
+    ; Roof at row 0
+    mov dh, 0
+    mov dl, bl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    mov al, 0xDF
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    ; Headlights
+    mov dl, byte [coin_car_col]
+    mov al, 0xFE
+    push bx
+    mov bl, 0x6F
+    call write_char
+    pop bx
+    
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x6F
+    call write_char
+    pop bx
+    
+    ; Body at row 1
+    mov dh, 1
+    mov dl, byte [coin_car_col]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov si, coin_car_col
+    mov dl, byte [si+2]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    ; Windshield (blinking)
+    mov al, [blink_state]
+    cmp al, 1
+    jne coin_not_visible
+    
+    mov dl, byte [si+2]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x65
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x65
+    call write_char
+    pop bx
+    
+    jmp coin_not_visible
+    
+draw_coin:
+    ; Draw complete car (all 3 rows)
     mov si, coin_car_col
     mov ax, [si]        ; First column
     mov bx, [si+2]      ; Second column
@@ -1777,134 +2146,124 @@ draw_coin_car:
     
     ; Roof (row = coin_car_row)
     mov dh, byte [coin_car_row]
-    mov dl, bl          ; Middle column for roof start
-    mov al, 0xDF        ; ▀
-    push bx
-    mov bl, 0x6E        ; Yellow
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column for roof end
+    mov dl, bl
+    mov al, 0xDF
     push bx
     mov bl, 0x6E
     call write_char
     pop bx
     
-    ; Body (row = coin_car_row+1)
-    inc dh
-    mov dl, byte [coin_car_col]
-    mov al, 0xDB        ; █
-    push bx
-    mov bl, 0x6E        ; Yellow
-    call write_char
-    pop bx
-    mov dl, bl          ; Second column
-    mov al, 0xDB
-    push bx
-    mov bl, 0x6E
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xDB
-    push bx
-    mov bl, 0x6E
-    call write_char
-    pop bx
     mov dl, cl
-    inc dl              ; Fourth column
-    mov al, 0xDB
+    mov al, 0xDF
     push bx
     mov bl, 0x6E
     call write_char
     pop bx
     
-    ; Bottom (row = coin_car_row+2)
-    inc dh
+    ; Headlights
     mov dl, byte [coin_car_col]
-    mov al, 0xDC        ; ▄
-    push bx
-    mov bl, 0x60        ; Black on yellow
-    call write_char
-    pop bx
-    mov dl, bl          ; Second column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x6E
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x6E
-    call write_char
-    pop bx
-    mov dl, cl
-    inc dl              ; Fourth column
-    mov al, 0xDC
-    push bx
-    mov bl, 0x60
-    call write_char
-    pop bx
-    
-    ; BLINKING Windshield (row = coin_car_row+1) - Purple when visible
-    dec dh
-    
-    ; Check blink state
-    mov al, [blink_state]
-    cmp al, 1
-    je .draw_purple_windshield
-    
-    ; If blink state is 0, draw normal yellow (invisible blink)
-    mov dl, bl          ; Second column
-    mov al, 0xDB        ; █ (same as body)
-    push bx
-    mov bl, 0x6E        ; Yellow (blend with body)
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xDB
-    push bx
-    mov bl, 0x6E
-    call write_char
-    pop bx
-    jmp .draw_headlights
-    
-.draw_purple_windshield:
-    ; Draw visible purple windshield
-    mov dl, bl          ; Second column
-    mov al, 0xB1        ; ▒
-    push bx
-    mov bl, 0x65        ; Purple on yellow (5 = purple, 6 = brown/yellow bg)
-    call write_char
-    pop bx
-    mov dl, cl          ; Third column
-    mov al, 0xB1
-    push bx
-    mov bl, 0x65        ; Purple on yellow
-    call write_char
-    pop bx
-    
-.draw_headlights:
-    ; Headlights (row = coin_car_row)
-    dec dh
-    mov dl, byte [coin_car_col]
-    mov al, 0xFE        ; ■
-    push bx
-    mov bl, 0x6F        ; White on yellow
-    call write_char
-    pop bx
-    mov dl, cl
-    inc dl              ; Fourth column
     mov al, 0xFE
     push bx
     mov bl, 0x6F
     call write_char
     pop bx
     
-.not_visible:
+    mov dl, cl
+    inc dl
+    mov al, 0xFE
+    push bx
+    mov bl, 0x6F
+    call write_char
+    pop bx
+    
+    ; Body (row = coin_car_row+1)
+    mov dh, byte [coin_car_row]
+    inc dh
+    mov dl, byte [coin_car_col]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov si, coin_car_col
+    mov dl, byte [si+2]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDB
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    ; Windshield (blinking)
+    mov al, [blink_state]
+    cmp al, 1
+    jne .skip_windshield
+    
+    mov dl, byte [si+2]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x65
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xB1
+    push bx
+    mov bl, 0x65
+    call write_char
+    pop bx
+    
+.skip_windshield:
+    ; Bottom (row = coin_car_row+2)
+    mov dh, byte [coin_car_row]
+    add dh, 2
+    mov dl, byte [coin_car_col]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x60
+    call write_char
+    pop bx
+    
+    mov si, coin_car_col
+    mov dl, byte [si+2]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    mov dl, byte [si+4]
+    mov al, 0xDC
+    push bx
+    mov bl, 0x6E
+    call write_char
+    pop bx
+    
+    inc dl
+    mov al, 0xDC
+    push bx
+    mov bl, 0x60
+    call write_char
+    pop bx
+    
+coin_not_visible:
     pop si
     popa
     ret
-
 
 
 ; draw_black_after_road: Draw black area after road (right side of road)
@@ -2420,7 +2779,6 @@ scrollLoop:
     mov ax, [carD_row]
     inc ax
     mov [carD_row], ax
-    
     cmp ax, 29
     jl .obstacle_still_visible
     
