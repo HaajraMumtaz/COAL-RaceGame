@@ -3,7 +3,6 @@
 [org 0x0100]
 jmp start
 
-; ========== DATA ==========
 temp_char db 0
 temp_color db 0
 temp_start_col db 0
@@ -16,26 +15,31 @@ fuel_text db 'Fuel', 0
 divider_offset db 0
 car_row db 20           ; Default car row position
 car_col db 24           ; Default car column position
-
+default_row:db 20
+default_col: db 24
 ; Random car generation variables
 seed dw 10
 carD_col dw 0, 0, 0     ; Three column positions for obstacle car
 coin_car_col dw 0, 0, 0 ; Three column positions for coin car
 apparent_road_corners dw 13  ; Left edge of road (column 13)
-obstacle_car_row dw -5   ; Current row of obstacle car (starts at top)
+carD_row dw -5   ; Current row of obstacle car (starts at top)
 coin_car_row dw -5      ; Current row of coin car (starts at middle)
 blink_counter db 0      ; Counter for blinking effect (0-15)
 blink_state db 1        ; 1 = visible, 0 = invisible
-
+not_visible_row: db -3
 temp_row db 1           ; Temporary storage for calculations
 temp_col db 1
 
 ;flags + car movement
 car_move_left: db 0
 car_move_right: db 0
-car_speed: db 9       ; Pixels to move per frame (adjust for smoothness)
-;=====================================================================================
-; ASCII Art for GAME OVER (using text characters)
+car_move_up:db 0
+car_move_down:db 0
+car_speed: db 9       ; Pixels to move per frame (adjust for smoothness);HORIZONTALLY
+car_vert_speed: db 2
+replay:db 0
+
+;-------------------------------------------ASCII Art for GAME OVER (using text characters)-----------------------------------------------------
 line1:  db '  ####      #     #     # #####      ####  #     # ##### ####   ', 0
 line2:  db ' #    #    # #    ##   ## #         #    # #     # #     #   #  ', 0
 line3:  db ' #        #   #   # # # # #         #    # #     # #     #   #  ', 0
@@ -63,8 +67,7 @@ decoration: db '================================', 0
 ; Sample score
 totalscore: dw 1234
 ; Keyboard status
-screen_status: db 0  ;-1=first time 0=waiting, 1=play again, 2=terminate
-; Old ISR storage
+; Old ISR storag
 oldisr: dd 0
 ; Current row for curtain effect
 current_row: db 0
@@ -111,13 +114,7 @@ car_x: dw 0           ; Current X position (start from leftmost)
 car_y: dw 12          ; Fixed Y position
 car_width: dw 36      ; Car width in columns
 
-
-
-
-
-; ============================================
 ; DATA SECTION - INSTRUCTIONS SCREEN
-; ============================================
 Instructions: db'Game Instructions:'
 Instructions_len: dw 18
 Instructions_atrb: dw 0x07
@@ -387,9 +384,15 @@ key_press:
     je set_left
     cmp al, 0x4D        ; Right arrow pressed
     je set_right
-    cmp al, 0x01        ; ESC key scancode is 0x01, not 0x1b
-    je endPop
-    jmp kb_done         ; Add this to handle other keys
+	cmp al,0x48
+	je set_up
+	cmp al,0x50
+	je set_down
+    cmp al, 0x01        ; ESC key
+    je handle_esc
+    cmp al, 0x19        ; P key scancode
+    je handle_p
+    jmp kb_done
     
 key_release:
     and al, 0x7F        ; Remove release bit    
@@ -397,8 +400,17 @@ key_release:
     je clear_left
     cmp al, 0x4D        ; Right arrow released
     je clear_right
+	cmp al,0x48
+	je clear_up
+	cmp al,0x50
+	je clear_down
     jmp kb_done
-    
+set_up:
+	mov byte [car_move_up], 1
+    jmp kb_done
+set_down:
+	mov byte [car_move_down], 1
+    jmp kb_done
 set_left:
     mov byte [car_move_left], 1
     jmp kb_done
@@ -411,23 +423,30 @@ clear_left:
     mov byte [car_move_left], 0
     jmp kb_done
     
-endPop:
-    mov byte [screen_status], 1
-    mov byte [game_paused], 1
-    jmp kb_done         ; Must jump to kb_done!
-    
 clear_right:
     mov byte [car_move_right], 0
-    jmp kb_done         ; Add explicit jump
+    jmp kb_done
+clear_up:
+	mov byte[car_move_up],0
+	jmp kb_done
+clear_down:
+	mov byte[car_move_down],0
+	jmp kb_done
+
+handle_esc:
+    mov byte [game_paused], 1
+    jmp kb_done
+
+handle_p:
+    mov byte[replay],1
+    jmp kb_done
     
 kb_done:
-    ; Send EOI to PIC
     mov al, 0x20
     out 0x20, al
     
     pop ax
-	jmp far[cs:oldisr]
-    iret                ; Use iret instead of jmp far for ISR
+    jmp far [cs:oldisr]             ; Use iret instead of jmp far for ISR
 
 ; Hook keyboard interrupt
 hook_kbisr:
@@ -470,7 +489,18 @@ unhook_kbisr:
     pop ax
     pop es
     ret
-	
+	; Clear keyboard buffer by reading all pending keystrokes
+clear_keyboard_buffer:
+    push ax
+clear_kb_loop:
+    in al, 0x64         ; Read keyboard controller status port
+    test al, 1          ; Check if output buffer has data (bit 0)
+    jz clear_done       ; If no data, buffer is clear
+    in al, 0x60         ; Read and discard the keystroke from data port
+    jmp clear_kb_loop   ; Check again
+clear_done:
+    pop ax
+    ret
 ; ============================================
 ; SUBROUTINE: Print String
 ; Input: DH=row, DL=column, SI=string, BL=attribute
@@ -509,7 +539,18 @@ print_string:
     pop bx
     pop ax
     ret
-	
+;-----------------------------------------game reset-------------------------------------------------------------------
+set_game:
+	mov byte[replay],0
+	mov byte[game_paused],0
+	mov al,[default_row]
+	mov byte[car_row],al
+	mov al,[default_col]
+	mov byte[car_col],al
+	mov byte[car_col],AL
+	mov al,[not_visible_row]
+	mov byte[carD_row],AL
+	mov byte[coin_car_row],al
 ;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
 ;------------maun func-------------
 
@@ -828,7 +869,6 @@ clear_car:
     pop bx
     pop ax
     ret
-
 
 clrscr:
 	push bp
@@ -1551,13 +1591,13 @@ draw_player_car:
     ret
 
 ; draw_obstacle_car: Draw regular obstacle car at current position
-; Uses carD_col array for column positions and obstacle_car_row for row
+; Uses carD_col array for column positions and carD_row for row
 draw_obstacle_car:
     pusha
     push si
     
     ; Check if car is visible on screen (rows 0-22, need 3 rows for car)
-    mov ax, [obstacle_car_row]
+    mov ax, [carD_row]
     cmp ax, 0
     jge .check_upper
     jmp .not_visible
@@ -1573,8 +1613,8 @@ draw_obstacle_car:
     mov bx, [si+2]      ; Second column
     mov cx, [si+4]      ; Third column
     
-    ; Roof (row = obstacle_car_row)
-    mov dh, byte [obstacle_car_row]
+    ; Roof (row = carD_row)
+    mov dh, byte [carD_row]
     mov dl, bl          ; Middle column for roof start
     mov al, 0xDF        ; ▀
     push bx
@@ -1587,7 +1627,7 @@ draw_obstacle_car:
     call write_char
     pop bx
     
-    ; Body (row = obstacle_car_row+1)
+    ; Body (row = carD_row+1)
     inc dh
     mov dl, byte [carD_col]
     mov al, 0xDB        ; █
@@ -1615,7 +1655,7 @@ draw_obstacle_car:
     call write_char
     pop bx
     
-    ; Bottom (row = obstacle_car_row+2)
+    ; Bottom (row = carD_row+2)
     inc dh
     mov dl, byte [carD_col]
     mov al, 0xDC        ; ▄
@@ -1643,7 +1683,7 @@ draw_obstacle_car:
     call write_char
     pop bx
     
-    ; Windshield (row = obstacle_car_row+1) - Regular light blue
+    ; Windshield (row = carD_row+1) - Regular light blue
     dec dh
     mov dl, bl          ; Second column
     mov al, 0xB1        ; ▒
@@ -1658,7 +1698,7 @@ draw_obstacle_car:
     call write_char
     pop bx
     
-    ; Headlights (row = obstacle_car_row)
+    ; Headlights (row = carD_row)
     dec dh
     mov dl, byte [carD_col]
     mov al, 0xFE        ; ■
@@ -2284,13 +2324,33 @@ update_car_position:
     push ax
     
     ; Handle left movement
-    cmp byte [car_move_left], 1
-    jne check_right
+    cmp byte [car_move_right], 1
+    je check_right
+	cmp byte[car_move_up],1
+	je check_up
+	cmp byte[car_move_down],1
+	je check_down
+	cmp byte[car_move_left],1
+	jne move_done
     cmp byte [car_col], 19
     jbe check_right
     mov al, [car_speed]
     sub byte [car_col], al
-    
+check_up:
+	cmp byte [car_move_up], 1
+    jne move_done
+    cmp byte [car_row], 0
+    jbe move_done
+    mov al, [car_vert_speed]
+    sub byte [car_row],al
+check_down:
+	cmp byte [car_move_down], 1
+    jne move_done
+    cmp byte [car_row], 22
+    jae move_done
+    mov al, [car_vert_speed]
+    add byte [car_row], al
+	
 check_right:
     ; Handle right movement
     cmp byte [car_move_right], 1
@@ -2304,7 +2364,10 @@ move_done:
     pop ax
     ret
 scrollbg:
-    pusha
+    push ax
+    push bx
+    push cx
+    push dx
     ; Draw static background elements once
     call draw_black_after_road
     call draw_brown_rectangle
@@ -2313,7 +2376,7 @@ scrollbg:
     
 
     call randomize_obstacle_car_lane
-    mov word [obstacle_car_row], -3   ; Start off-screen (3 rows above)
+    mov word [carD_row], -3   ; Start off-screen (3 rows above)
     
     ; Initialize coin car at middle with random lane
     call randomize_coin_car_lane
@@ -2322,6 +2385,10 @@ scrollbg:
     mov byte [divider_offset], 0      ; Initialize offset
     mov byte [blink_counter], 0       ; Initialize blink counter
     mov byte [blink_state], 1         ; Start with visible purple
+	mov ah,0
+    int 16h
+    
+    call hook_kbisr
     
 scrollLoop:
     ; Check if game is paused
@@ -2340,15 +2407,15 @@ scrollLoop:
     
     call delay
     
-    mov ax, [obstacle_car_row]
+    mov ax, [carD_row]
     inc ax
-    mov [obstacle_car_row], ax
+    mov [carD_row], ax
     
     cmp ax, 29
     jl .obstacle_still_visible
     
     call randomize_obstacle_car_lane
-    mov word [obstacle_car_row], -3
+    mov word [carD_row], -3
     
 .obstacle_still_visible:
     mov ax, [coin_car_row]
@@ -2407,8 +2474,14 @@ pause_loop:
     ; Any other key, keep waiting
     jmp pause_loop
 exit:
-	call screenEnd
-	popa
+	call unhook_kbisr
+	call clear_keyboard_buffer
+    mov byte [game_paused], 0
+	mov byte[replay],0
+	pop dx
+    pop cx
+    pop bx
+    pop ax
 	ret
 resume_game:
     ; Unpause - set flag to 0
@@ -2728,51 +2801,66 @@ screenEndprep:
     pop ax
     pop bp
     ret
-
 screenEnd:
+    ; Ensure ES is set at start
+    mov ax, 0xB800
+    mov es, ax
+	call clear_keyboard_buffer
+	push 0x0720
 	call clrscr
-    call hook_kbisr
     call screenEndprep
-    wait_loop:
-        mov al, [screen_status]
-        cmp al, 0
-        je wait_loop
-    call unhook_kbisr
-    call clrscr
-    mov al, [screen_status]
-    cmp al, 1
-    je play_again_msg
-    cmp al, 2
-    je terminate
     
-    play_again_msg:
-    ; Display restart message
-    push 12
-    push 30
-    push 0x0A       ; green
-    mov ax, restart_msg
-    push ax
-    call print_string_color
-    
-    call delay
-	
+    ; Clear buffer and hook ISR BEFORE waiting
+	mov ah, 00h
+		int 16h
+	; Check if 'P' or 'p' key
+	wait_key:
+	cmp al, 'P'
+	je play_again_msg
+	cmp al, 'p'
+	je play_again_msg
+	cmp al,0x1b
+	je no_replay
+	call clear_keyboard_buffer
+	jmp wait_key
+	no_replay:
+		mov byte[replay],0
+		jmp terminate
+	play_again_msg:
+		mov byte[replay],1
+		 ; Display restart message
+		push 0x0720
+		call clrscr
+		push 12
+		push 30
+		push 0x0A       ; green
+		mov ax, restart_msg
+		push ax
+		call print_string_color
+		call delay
+		call delay
 	terminate:
-			ret
+		ret
+
 ; ========== MAIN PROGRAM ==========
 start:
 
-	call screen1
-    call instructions_page
-	call clrscr
-	call drawBg
-	mov ah,0
-	int 16h
-	call hook_kbisr
-    ; Start scrolling animation (road moves, car stays static) once any key pressed
-    call scrollbg
-    ; After user presses key, redraw final static scene
+    call screen1
+	call instructions_page
+game:
+	call set_game
+	push 0x0720
+    call clrscr
+    call drawBg
+    call scrollbg  
     call screenEnd
-    
-    ; Terminate
+	cmp byte[replay],1
+	je game
+	push 0x0720
+	call clrscr
+	
     mov ax, 0x4c00
     int 0x21
+
+
+
