@@ -30,6 +30,10 @@ not_visible_row: db -2
 temp_row db 1           ; Temporary storage for calculations
 temp_col db 1
 
+; ===== DATA SECTION =====
+text_fuel:  db 'FUEL', 0
+text_score: db 'SCORE', 0
+
 ;TIMER VARIABLES
 countdown dw 0
 lane_switch_cooldown dw 0        ; Counter in timer ticks
@@ -2504,24 +2508,6 @@ refresh_bar_fill:
     pop bp
     ret 4
 
-; ===== DATA SECTION =====
-text_fuel:  db 'FUEL', 0
-text_score: db 'SCORE', 0
-
-; ===== USAGE EXAMPLES =====
-; To draw initial bars:
-;   call display_fuel_score_bars
-;
-; To update fuel bar to 4/6:
-;   push 0          ; 0 = fuel bar
-;   push 4          ; 4 cells filled
-;   call refresh_bar_fill
-;
-; To update score bar to 6/6:
-;   push 1          ; 1 = score bar
-;   push 6          ; 6 cells filled (full)
-;   call refresh_bar_fill
-; randomize_obstacle_car_lane: Randomize the obstacle car's lane
 randomize_obstacle_car_lane:
 	push bp
 	mov bp, sp
@@ -3216,47 +3202,50 @@ screenEndprep:
     pop bp
     ret
 screenEnd:
-    ; Ensure ES is set at start
     mov ax, 0xB800
     mov es, ax
-	call clear_keyboard_buffer
-	push 0x0720
-	call clrscr
+    call clear_keyboard_buffer
+    push 0x0720
+    call clrscr
     call screenEndprep
     
-    ; Clear buffer and hook ISR BEFORE waiting
-	mov ah, 00h
-		int 16h
-	; Check if 'P' or 'p' key
-	wait_key:
-	cmp al, 'P'
-	je play_again_msg
-	cmp al, 'p'
-	je play_again_msg
-	cmp al,0x1b
-	je no_replay
-	call clear_keyboard_buffer
-	jmp wait_key
-	no_replay:
-		mov byte[replay],0
-		jmp terminateL
-	play_again_msg:
-		mov byte[replay],1
-		 ; Display restart message
-		push 0x0720
-		call clrscr
-		push 12
-		push 30
-		push 0x0A       ; green
-		mov ax, restart_msg
-		push ax
-		call print_string_color
-		call delay
-		call delay
-		
-	terminateL:
-		ret
-
+    call clear_keyboard_buffer
+    
+wait_key:
+    ; Read key INSIDE the loop
+    mov ah, 00h
+    int 16h
+    
+    ; Now check what was pressed
+    cmp al, 'P'
+    je play_again_msg
+    cmp al, 'p'
+    je play_again_msg
+    cmp al, 0x1b        ; ESC key
+    je no_replay
+    
+    ; If none of the above, wait for another key
+    jmp wait_key
+    
+no_replay:
+    mov byte[replay], 0
+    jmp terminateL
+    
+play_again_msg:
+    mov byte[replay], 1
+    push 0x0720
+    call clrscr
+    push 12
+    push 30
+    push 0x0A
+    mov ax, restart_msg
+    push ax
+    call print_string_color
+    call delay
+    call delay
+    
+terminateL:
+    ret
 ; ========== MAIN PROGRAM ==========
 start:
 
