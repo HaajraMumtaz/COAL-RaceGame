@@ -33,7 +33,7 @@ temp_col db 1
 ; ===== DATA SECTION =====
 text_fuel:  db 'FUEL', 0
 text_score: db 'SCORE', 0
-
+fuel_rev_msg: db 'FUEL LEVEL IS BACK UP!'
 ;TIMER VARIABLES
 countdown dw 0
 lane_switch_cooldown dw 0        ; Counter in timer ticks
@@ -48,6 +48,9 @@ car_vert_speed: db 2
 replay:db 0
 terminate: db 0  
 coin_consumed:db 0
+clear_timer:dw 0
+msg_displaying:db 0
+add_score:db 0
 ;-------------------------------------------ASCII Art for GAME OVER (using text characters)-----------------------------------------------------
 line1:  db '  ####      #     #     # #####      ####  #     # ##### ####   ', 0
 line2:  db ' #    #    # #    ##   ## #         #    # #     # #     #   #  ', 0
@@ -74,7 +77,7 @@ play_again: db 'P - Play Again', 0
 exit_game: db 'ESC - Exit Game', 0
 decoration: db '================================', 0
 ; Sample score
-totalscore: dw 1234
+totalscore: dw 0
 ; Keyboard status
 ; Old ISR storag
 oldisr: dd 0
@@ -87,9 +90,19 @@ game_paused db 0        ; 0 = not paused, 1 = paused
 exit_question db 'Do you want to exit?', 0
 yes_option db 'Yes', 0
 no_option db 'No', 0
-[org 0x0100]
-jmp start
-
+; Fuel system variables
+fuel_timer dw 0              ; Timer ticks counter
+fuel_level db 6              ; Current fuel level (0-6 cells)
+FUEL_TICK_RATE equ 120      ; 5 seconds worth of ticks (18 ticks/sec * 5)
+fuel_depleted db 0           ; Flag: 1 = fuel ended popup shown
+fuel_ended_msg: db 'FUEL ENDED!', 0
+fuel_icon_timer dw 0
+show_fuel_icon:db 0;after timer 200 and 340
+fuel_col:    dw 24          ; Column position of fuel (default middle)
+fuel_row:    dw 2           ; Row position of fuel
+fuel_active: db 0           ; 1 if fuel is visible, 0 if not
+fuel_spawn_needed: db 0
+hide_fuel:db 0
 ; ============================================
 ; DATA SECTION - START SCREEN
 ; ============================================
@@ -185,6 +198,10 @@ DownKey_atrb2: dw 0x07
 Instructions_pause: db 'Game will start in: '
 Instructions_pause_len: dw 20
 Instructions_pause_atrb: dw 0x0C
+
+
+crash_msg: db ' CRASH! ', 0
+coin_plus_msg: db '+30 POINTS ADDED!!', 0  ; +100 followed by ☼ symbol
 ;------------------------------------------------------------------------------------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------Helpers---------------------------------------------------------------------------
 ;---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -412,6 +429,16 @@ print_number_at:
 		pop ax
 		pop cx
 		ret
+		
+		
+delay_short:
+    push cx
+    mov cx, 0x0FFF              ; Shorter delay for smooth animation
+delay_short_loop:
+    loop delay_short_loop
+    pop cx
+    ret
+
 		;------------------------------------------------------interrupt handling----------------------------------------------------------------------
 
 ; KEYBOARD ISR 
@@ -438,24 +465,33 @@ key_press:
     je set_down
     
     ; Other keys have NO cooldown
-    cmp al, 0x01        ; ESC key
-    je handle_esc
-    cmp al, 0x19        ; P key scancode
-    je handle_p
-    jmp kb_done
+   cmp al, 0x01        ; ESC key
+jne check_p_key     ; Use jne (jump if NOT ESC)
+jmp handle_esc      ; Use long jmp for ESC
+
+check_p_key:
+cmp al, 0x19        ; P key scancode
+je .do_handle_p     ; Short jump if P is pressed
+jmp kb_done         ; Long jump if NOT P
+
+.do_handle_p:
+jmp handle_p    
 
 ; COOLDOWN CHECKS - Only for left/right arrows
 
 check_cooldown_left:
     cmp word [cs:lane_switch_cooldown], 0
-    jne kb_done         ; Cooldown active, IGNORE this keypress
-    jmp set_left        ; Cooldown expired, allow movement
+    je .allow_left  ; Jump to nearby label if cooldown expired
+    jmp kb_done     ; Use long jmp if cooldown active
+.allow_left:
+    jmp set_left       ; Cooldown expired, allow movement
 
 check_cooldown_right:
     cmp word [cs:lane_switch_cooldown], 0
-    jne kb_done         ; Cooldown active, IGNORE this keypress
-    jmp set_right       ; Cooldown expired, allow movement
-    
+    je .allow_right  ; Jump to nearby label if cooldown expired
+    jmp kb_done      ; Use long jmp if cooldown active
+.allow_right:
+    jmp set_right
 key_release:
     and al, 0x7F        ; Remove release bit    
     cmp al, 0x4B        ; Left arrow released
@@ -579,14 +615,47 @@ clear_done:
 
 new_timer_isr:
     push ax
-   
+    push bx
+    add word [cs:fuel_icon_timer], 1
     cmp word [cs:lane_switch_cooldown], 0
-    je .no_cooldown     ; Already zero, don't decrement
+    je .no_cooldown
     dec word [cs:lane_switch_cooldown]
     
 .no_cooldown:
+    ; Handle fuel depletion timer
+    inc word [cs:fuel_timer]
+    mov ax, [cs:fuel_timer]
+    cmp ax, FUEL_TICK_RATE
+    jb .no_fuel_update
+    
+    mov word [cs:fuel_timer], 0
+    
+    mov al, [cs:fuel_level]
+    cmp al, 0
+    je .no_fuel_update
+    
+    sub al, 2
+    jns .store_fuel
+    xor al, al
+    
+.store_fuel:
+    mov [cs:fuel_level], al
+
+.no_fuel_update:
+    mov ax, [cs:fuel_icon_timer]
+    cmp ax, 210
+    je .set_spawn_flag
+    cmp ax, 320
+    je .set_spawn_flag
+    jmp .return_isr
+    
+.set_spawn_flag:
+    mov byte [cs:show_fuel_icon], 1   ; Just set the flag!
+    
+.return_isr:
+    pop bx
     pop ax
-    jmp far [cs:old_timer]  ; Chain to BIOS
+    jmp far [cs:old_timer]
 
 
 ; HOOK TIMER INTERRUPT
@@ -683,8 +752,11 @@ set_game:
 	mov word[carD_row], -2
 	mov word[coin_car_row], -2
 	mov byte[terminate],0
-	ret
-	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
+	mov byte[fuel_level], 6      ; Reset fuel to full
+	mov word[fuel_timer], 0      ; Reset fuel timer
+	mov byte[fuel_depleted], 0   ; Reset fuel popup flag
+	
+	ret	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
 ;------------maun func-------------
 
 screen1:
@@ -1566,14 +1638,12 @@ check_collisions:
     cmp byte [terminate], 1
     je .collision_detected      ; If crashed, exit immediately
     call check_coin_collision
-    
+
+    call check_fuel_collision
 .collision_detected:
     popa
     ret
 
-; ============================================================================
-; CHECK OBSTACLE CAR COLLISION
-; ============================================================================
 ; Checks if player car overlaps with obstacle car
 ; Sets terminate flag if collision detected
 
@@ -1582,9 +1652,7 @@ check_obstacle_collision:
     push bx
     push cx
     
-    ; ─────────────────────────────────────────────────────────────
     ; STEP 1: Check vertical overlap (row collision)
-    ; ─────────────────────────────────────────────────────────────
     ; Player car is at [car_row] and is 4 rows tall
     ; Obstacle car is at [carD_row] and is 4 rows tall
     
@@ -1612,9 +1680,7 @@ check_obstacle_collision:
     cmp dx, ax                      ; Is obstacle_bottom < player_top?
     jl .no_obstacle_collision       ; No overlap
     
-    ; ─────────────────────────────────────────────────────────────
-    ; STEP 2: Vertical overlap exists, now check horizontal overlap
-    ; ─────────────────────────────────────────────────────────────
+    ; 2: Vertical overlap exists, now check horizontal overlap
     ; Car columns are stored in carD_col (obstacle) and car_col (player)
     ; Each car is 5 columns wide
     
@@ -1631,11 +1697,9 @@ check_obstacle_collision:
     jl .no_obstacle_collision       ; Obstacle too far left
     cmp bx, 4
     jg .no_obstacle_collision       ; Obstacle too far right
-    
-    ; ─────────────────────────────────────────────────────────────
-    ; COLLISION DETECTED!
-    ; ─────────────────────────────────────────────────────────────
+    ; COLLISION DETECTED
     mov byte [terminate], 1
+    call crash_effect  
     
     ; Optional: Play crash sound or show explosion
     ; call play_crash_sound
@@ -1651,11 +1715,6 @@ check_obstacle_collision:
     pop ax
     ret
 
-; ============================================================================
-; CHECK COIN CAR COLLISION
-; ============================================================================
-; Checks if player car overlaps with coin car (bonus car)
-; Adds score and respawns coin car if collision detected
 
 check_coin_collision:
     push ax
@@ -1704,14 +1763,12 @@ check_coin_collision:
     ; ─────────────────────────────────────────────────────────────
     ; COIN COLLECTED!
     ; ─────────────────────────────────────────────────────────────
-    
+
     ; Add score (example: +100 points)
-    mov ax, [totalscore]
-    add ax, 100
-    mov [totalscore], ax
+	mov byte[add_score],1
 	mov byte[coin_consumed],1
+	call coin_consumed_effect
     ; Optional: Update displayed score
-    call display_fuel_score_bars
     
 .no_coin_collision:
     pop dx
@@ -1719,6 +1776,341 @@ check_coin_collision:
     pop bx
     pop ax
     ret
+	
+	
+check_fuel_collision:
+    push ax
+    push bx
+    push cx
+    push dx
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; STEP 1: Check vertical overlap
+    ; ─────────────────────────────────────────────────────────────
+    movzx ax, byte [car_row]        ; Player car top row
+    mov cx, ax
+    add cx, 3                       ; Player car bottom row
+    
+    mov bx, [fuel_row]          ; Coin car top row
+    
+    ; Check if coin car is off-screen
+    cmp bx, -4
+    jl .no_fuel_collision
+    cmp bx, 29
+    jg .no_fuel_collision
+    
+    ; Check vertical overlap
+    mov dx, bx
+    add dx, 3                       ; Coin car bottom row
+    
+    cmp bx, cx                      ; Is coin_top > player_bottom?
+    jg .no_fuel_collision
+    
+    cmp dx, ax                      ; Is coin_bottom < player_top?
+    jl .no_fuel_collision
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; STEP 2: Check horizontal overlap
+    ; ─────────────────────────────────────────────────────────────
+    movzx ax, byte [car_col]        ; Player car left column
+    mov bx, [fuel_col]          ; Coin car left column
+    
+    sub bx, ax                      ; Difference
+    
+    cmp bx, -4
+    jl .no_fuel_collision
+    cmp bx, 4
+    jg .no_fuel_collision
+    
+	mov dh, 12
+    mov dl, 56
+    mov cx, 15
+	
+	.clear_msg:
+    mov al, ''              
+    mov bl, 0x60             
+    call write_char
+    inc dl
+    loop .clear_msg
+    ; ─────────────────────────────────────────────────────────────
+    ; fuel revived
+    ; ─────────────────────────────────────────────────────────────
+	mov dh, 12                  ; Center screen vertically
+    mov dl, 56                  ; Left black area (columns 0-11)
+    mov bl, 0x60                ; Yellow on red background
+    mov si, fuel_rev_msg
+    call print_string
+    
+    mov word[clear_timer],30
+    ; Clear the message
+    mov dh, 12
+    mov dl, 56
+    mov cx, 22
+	mov byte[msg_displaying],1
+	mov byte[hide_fuel],1
+	mov word[fuel_timer], 0              ; Timer ticks counter
+	mov byte[fuel_level], 6  
+    mov word[fuel_icon_timer],0
+.no_fuel_collision:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+	
+	
+;-------------------------------------------EFFECTS------------------------------------------------------
+crash_effect:
+    pusha
+    
+    ; Get player car position for explosion center
+    movzx dx, byte [car_row]
+    add dx, 2                   ; Center of car (row)
+    movzx cx, byte [car_col]
+    add cx, 2                   ; Center of car (column)
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; EXPLOSION FRAME 1: Initial spark burst
+    ; ─────────────────────────────────────────────────────────────
+    mov dh, dl                  ; Center row
+    mov dl, cl                  ; Center column
+    mov bl, 0x0E                ; Yellow on black
+    
+    ; Center spark
+    mov al, 0x0F                ; ☼ sun/explosion symbol
+    call write_char
+    
+    ; Surrounding sparks
+    dec dh                      ; Above
+    mov al, '*'
+    call write_char
+    
+    inc dh
+    inc dh                      ; Below
+    mov al, '*'
+    call write_char
+    
+    dec dh                      ; Back to center row
+    dec dl                      ; Left
+    mov al, 0xF9                ; · bullet
+    call write_char
+    
+    inc dl
+    inc dl                      ; Right
+    mov al, 0xF9                ; · bullet
+    call write_char
+    
+    call delay_short
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; EXPLOSION FRAME 2: Expanding burst
+    ; ─────────────────────────────────────────────────────────────
+    movzx dx, byte [car_row]
+    add dx, 2
+    movzx bx, byte [car_col]
+    add bx, 2
+    
+    mov dh, dl
+    dec dh                      ; Above center
+    mov dl, bl
+    dec dl                      ; Left of center
+    
+    mov bl, 0x0E                ; Yellow
+    mov al, 0x2A                ; * asterisk
+    call write_char
+    
+    inc dl
+    inc dl                      ; Right of center
+    call write_char
+    
+    mov dl, bl                  ; Back to center column
+    inc dh
+    inc dh                      ; Below center
+    dec dl                      ; Left
+    call write_char
+    
+    inc dl
+    inc dl                      ; Right
+    call write_char
+    
+    ; Bright flash at center
+    movzx dx, byte [car_row]
+    add dx, 2
+    movzx cx, byte [car_col]
+    add cx, 2
+    mov dh, dl
+    mov dl, cl
+    mov bl, 0x0C                ; Bright red flash
+    mov al, 0xDB                ; █ solid block
+    call write_char
+    
+    call delay_short
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; EXPLOSION FRAME 3: Fade with debris
+    ; ─────────────────────────────────────────────────────────────
+    mov bl, 0x06                ; Brown/orange fade
+    
+    movzx dx, byte [car_row]
+    add dx, 1
+    movzx cx, byte [car_col]
+    add cx, 1
+    
+    ; Draw debris pattern
+    mov dh, dl
+    mov dl, cl
+    mov al, 0xF8                ; ° degree symbol (smoke)
+    call write_char
+    
+    inc dl
+    inc dl
+    call write_char
+    
+    inc dh
+    mov dl, cl
+    call write_char
+    
+    inc dl
+    inc dl
+    call write_char
+    
+    call delay_short
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; Display "CRASH!" message in RIGHT AREA (columns 0-11)
+    ; ─────────────────────────────────────────────────────────────
+	
+
+	mov dh, 12
+    mov dl, 56
+    mov cx, 19
+	.clear_msg:
+    mov al, ''              
+    mov bl, 0x60             
+    call write_char
+    inc dl
+    loop .clear_msg
+	
+    mov dh, 12                  ; Center screen vertically
+    mov dl, 62                  ; Left black area (columns 0-11)
+    mov bl, 0x4E                ; Yellow on red background
+    mov si, crash_msg
+    call print_string
+    
+    ; Longer delay to show crash message
+    call delay
+    call delay
+    
+    popa
+    ret
+
+coin_consumed_effect:
+    pusha
+    
+    ; Get coin car position for effect center
+    mov dx, [coin_car_row]
+    add dx, 1                   ; Center of coin car
+    mov cx, [coin_car_col]
+    add cx, 2                   ; Center column of coin car
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; SPARKLE FRAME 1: Initial flash
+    ; ─────────────────────────────────────────────────────────────
+    mov dh, dl                  ; Coin car center row
+    mov dl, cl                  ; Coin car center column
+    mov bl, 0x0B                ; Bright cyan on black
+    mov al, 0x0F                ; ☼ sun symbol
+    call write_char
+    
+    ; Surrounding sparkles
+    dec dh                      ; Above
+    mov al, 0xF9                ; · bullet
+    call write_char
+    
+    inc dh
+    inc dh                      ; Below
+    call write_char
+    
+    dec dh                      ; Back to center
+    dec dl                      ; Left
+    call write_char
+    
+    inc dl
+    inc dl                      ; Right
+    call write_char
+    
+    call delay_short
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; SPARKLE FRAME 2: Expanding twinkle
+    ; ─────────────────────────────────────────────────────────────
+    mov dx, [coin_car_row]
+    add dx, 1
+    mov cx, [coin_car_col]
+    add cx, 2
+    
+    mov bl, 0x0E                ; Yellow sparkle
+    mov al, '*'
+    
+    mov dh, dl                  ; Center
+    mov dl, cl
+    call write_char
+    
+    dec dh                      ; Top-left
+    dec dl
+    call write_char
+    
+    inc dl
+    inc dl                      ; Top-right
+    call write_char
+    
+    mov dh, dl                  ; Reset to center row
+    mov dx, [coin_car_row]
+    add dx, 1
+    mov dh, dl
+    inc dh                      ; Bottom row
+    
+    mov dl, cl                  ; Center column
+    dec dl                      ; Bottom-left
+    call write_char
+    
+    inc dl
+    inc dl                      ; Bottom-right
+    call write_char
+    
+    
+    ; ─────────────────────────────────────────────────────────────
+    ; Display "+100" score popup in LEFT BLACK AREA (columns 0-11)
+    ; ─────────────────────────────────────────────────────────────
+	
+	mov dh, 12
+    mov dl, 56
+    mov cx, 19
+	.clear_msg:
+    mov al, ''              
+    mov bl, 0x60             
+    call write_char
+    inc dl
+    loop .clear_msg
+	
+     mov dh, 12                  ; Center screen vertically
+    mov dl, 56                  ; Left black area (columns 0-11)
+    mov bl, 0x60                ; Yellow on red background
+    mov si, coin_plus_msg
+    call print_string
+    
+	mov word[clear_timer],30
+    
+    popa
+    ret
+;DELETE TILL HERE
+
+
+
+
+
+
+
 ;--------------------------------------------------------------------------------------------Game screen----------------------------------------------------------------------------------------------------------
 ; draw_road: Draw straight road from top to bottom (full screen vertically)
 draw_road:
@@ -2350,7 +2742,9 @@ draw_score_boxes:
 		pop si
 		popa
 		ret
-
+		
+		
+	;------------------------------------------------------------------------------------------Fuel display funcs---------------------------------------------------------------------------------------
 ; draw_speed_fuel_bars: Draw speed and fuel bars at bottom of brown rectangle
 ; Vertical Fuel and Score Bars with Horizontal Cell Design
 ; Each bar has 6 horizontal cells stacked vertically
@@ -2360,20 +2754,38 @@ display_fuel_score_bars:
     pusha
     push si
     
-    ; ===== DRAW FUEL BAR (Left Bar) =====
-    ; Position: Columns 57-59, starting at Row 17
-    ; 6 cells with spacing between them
+    ; ===== DETERMINE FUEL COLOR BASED ON LEVEL =====
+    mov al, [fuel_level]
+    mov bl, 0x0A                ; Default green
     
+    cmp al, 4
+    jg .color_set               ; If > 4, keep green
+    
+    mov bl, 0x0E                ; Yellow for 4 or less
+    
+    cmp al, 2
+    jg .color_set               ; If > 2, keep yellow
+    
+    mov bl, 0x0C                ; Red for 2 or less
+    
+.color_set:
+    mov bh, bl                  ; Save fuel color in BH
+    
+    ; ===== DRAW FUEL BAR (Left Bar) =====
     mov dh, 17                  ; Starting row
-    mov cx, 6                   ; Number of cells
+    mov cl, [fuel_level]        ; Number of cells to draw
+    xor ch, ch
     
 .fuel_cell_loop:
+    cmp cx, 0
+    je .fuel_empty_cells        ; No more filled cells
+    
     push cx
     
-    ; Draw one horizontal cell at current row
+    ; Draw one filled horizontal cell
     mov dl, 57                  ; Column 57
-    mov bl, 0x0A                ; Green color
-    mov al, 0x5F                ; Underscore '_'
+    mov bl, bh                  ; Use saved fuel color
+    mov al, 0xDB                ; Full block '█'
     
     call write_char             ; Column 57
     inc dl
@@ -2381,15 +2793,32 @@ display_fuel_score_bars:
     inc dl
     call write_char             ; Column 59
     
-    ; Skip one row for spacing between cells
-    inc dh
+    inc dh                      ; Move to next row
     
     pop cx
-    loop .fuel_cell_loop
+    dec cx
+    jmp .fuel_cell_loop
+    
+.fuel_empty_cells:
+    ; Draw remaining empty cells
+    cmp dh, 23                  ; Stop at row 23
+    jge .draw_score_bar
+    
+    mov dl, 57
+    mov bl, 0x08                ; Dark gray for empty
+    mov al, 0x5F                ; Underscore '_'
+    
+    call write_char
+    inc dl
+    call write_char
+    inc dl
+    call write_char
+    
+    inc dh
+    jmp .fuel_empty_cells
     
     ; ===== DRAW SCORE BAR (Right Bar) =====
-    ; Position: Columns 70-72, starting at Row 17
-    
+.draw_score_bar:
     mov dh, 17                  ; Reset to starting row
     mov cx, 6                   ; Number of cells
     
@@ -2407,7 +2836,6 @@ display_fuel_score_bars:
     inc dl
     call write_char             ; Column 72
     
-    ; Skip one row for spacing between cells
     inc dh
     
     pop cx
@@ -2427,7 +2855,6 @@ display_fuel_score_bars:
     pop si
     popa
     ret
-
 ; ===== UPDATE BAR FILL LEVEL =====
 ; Parameters: bar_type (0=fuel, 1=score), fill_level (0-6)
 ; Call: push 0 or 1, push level, call refresh_bar_fill
@@ -2507,6 +2934,73 @@ refresh_bar_fill:
     popa
     pop bp
     ret 4
+	
+	; Draw Fuel Icon Subroutine 
+; Input: BX = X position (column), DX = Y position (row)
+
+; Input: AL = character, BL = color, DH = row, DL = column
+draw_fuel:
+    push ax
+    push bx
+    push cx
+    push dx
+    
+    mov ax, 0B800h
+    mov es, ax
+    
+    ; Calculate screen position: (Y * 160) + (X * 2)
+    mov ax, dx
+    mov cx, 160
+    mul cx
+    mov di, ax
+    shl bx, 1
+    add di, bx
+    
+    ; Color: Bright Red (0Ch) on black background
+    mov ah, 0Ch
+    
+    ; Row 2: Pump top
+    add di, 160
+    mov al, 0C9h        ; ╔ (double line top-left)
+    mov [es:di], ax
+    mov al, 0CDh        ; ═ (double horizontal)
+    mov [es:di+2], ax
+    mov [es:di+4], ax
+    mov al, 0BBh        ; ╗ (double line top-right)
+    mov [es:di+6], ax
+    
+    ; Row 3: Pump body with 'F'
+    add di, 160
+    mov al, 0BAh        ; ║ (double vertical)
+    mov [es:di], ax
+    mov al, 'F'
+    mov [es:di+2], ax
+    mov ah, 0Eh         ; Yellow 'F' for contrast
+    mov [es:di+2], ax
+    mov ah, 0Ch         ; Back to red
+    mov al, 0BAh
+    mov [es:di+4], ax
+    mov [es:di+6], ax
+    
+    ; Row 4: Pump base
+    add di, 160
+    mov al, 0C8h        ; ╚ (double line bottom-left)
+    mov [es:di], ax
+    mov al, 0CDh        ; ═
+    mov [es:di+2], ax
+    mov [es:di+4], ax
+    mov al, 0BCh        ; ╝ (double line bottom-right)
+    mov [es:di+6], ax
+    
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+╚═══╝
+	
+	;--------------------------------------------------------------------randomization-----------------------------------
 
 randomize_obstacle_car_lane:
 	push bp
@@ -2560,6 +3054,7 @@ randomize_obstacle_car_lane:
 
 ; randomize_coin_car_lane: Randomize the coin car's lane (must be different from obstacle)
 ; randomize_coin_car_lane: Randomize the coin car's lane (must be different from obstacle if they're close)
+; randomize_coin_car_lane: Randomize the coin car's lane (MUST be different from obstacle)
 randomize_coin_car_lane:
     push bp
     mov bp, sp
@@ -2569,53 +3064,62 @@ randomize_coin_car_lane:
     push cx
     push di
     
-.try_again:
-    ; Generate random lane: 0, 1, or 2 (left, middle, right)
+    ; First, determine which lane the obstacle car is in
+    ; Obstacle lanes: 15 (left), 24 (middle), 33 (right)
+    mov ax, [carD_col]
+    
+    ; Identify obstacle's lane (0=left, 1=middle, 2=right)
+    cmp ax, 15
+    je .obstacle_in_left
+    cmp ax, 24
+    je .obstacle_in_middle
+    ; Otherwise it's in right lane
+    
+    ; Obstacle is in RIGHT lane (33), choose LEFT or MIDDLE
     push 0
-    mov ax, 2          ; Random range: 0-2 for three lanes
+    mov ax, 1          ; Random 0 or 1
     push ax
     call RANDNUM
     pop ax
     
-    ; Calculate starting column based on lane
     cmp ax, 0
-    je .left_lane_coin
-    cmp ax, 1
-    je .middle_lane_coin
+    je .choose_left
+    jmp .choose_middle
     
-.right_lane_coin:
-    mov ax, 33
-    jmp .check_conflict
+.obstacle_in_left:
+    ; Obstacle is in LEFT lane (15), choose MIDDLE or RIGHT
+    push 0
+    mov ax, 1          ; Random 0 or 1
+    push ax
+    call RANDNUM
+    pop ax
     
-.middle_lane_coin:
-    mov ax, 24
-    jmp .check_conflict
+    cmp ax, 0
+    je .choose_middle
+    jmp .choose_right
     
-.left_lane_coin:
+.obstacle_in_middle:
+    ; Obstacle is in MIDDLE lane (24), choose LEFT or RIGHT
+    push 0
+    mov ax, 1          ; Random 0 or 1
+    push ax
+    call RANDNUM
+    pop ax
+    
+    cmp ax, 0
+    je .choose_left
+    jmp .choose_right
+    
+.choose_left:
     mov ax, 15
+    jmp .set_columns_coin
     
-.check_conflict:
-    ; Check vertical distance first
-    push ax                 ; Save our chosen column
+.choose_middle:
+    mov ax, 24
+    jmp .set_columns_coin
     
-    mov ax, [carD_row]
-    mov bx, [coin_car_row]
-    sub ax, bx
-    
-    ; Make distance positive
-    cmp ax, 0
-    jge .positive
-    neg ax
-.positive:
-    
-    ; If more than 6 rows apart, no conflict possible
-    cmp ax, 6
-    pop ax                  ; Restore our chosen column
-    jg .set_columns_coin    ; Far apart = safe to use this lane
-    
-    ; They're close - check if same lane as obstacle car
-    cmp ax, [carD_col]
-    je .try_again           ; Same lane AND close = try different lane
+.choose_right:
+    mov ax, 33
     
 .set_columns_coin:
     mov [coin_car_col], ax
@@ -2623,6 +3127,75 @@ randomize_coin_car_lane:
     mov [coin_car_col+2], ax
     add ax, 1 
     mov [coin_car_col+4], ax
+    
+    pop di
+    pop cx
+    pop bx
+    pop ax
+    pop es
+    pop bp
+    
+    ret
+	
+randomize_fuel:
+    push bp
+    mov bp, sp
+    push es
+    push ax
+    push bx
+    push cx
+    push di
+    
+    ; Get obstacle car lane
+    mov ax, [carD_col]
+    mov bx, ax              ; BX = obstacle lane
+    
+    ; Get coin car lane
+    mov cx, [coin_car_col]  ; CX = coin lane
+    
+    ; Now choose a lane that's different from both
+    ; Lanes: 15 (left), 24 (middle), 33 (right)
+    
+    ; Check all three lanes and find the free one(s)
+    cmp bx, 15
+    je .obstacle_left
+    cmp bx, 24
+    je .obstacle_middle
+    jmp .obstacle_right
+    
+.obstacle_left:
+    ; Obstacle in LEFT (15)
+    cmp cx, 24
+    je .choose_right        ; Coin in MIDDLE, fuel goes RIGHT
+    jmp .choose_middle      ; Coin in RIGHT, fuel goes MIDDLE
+    
+.obstacle_middle:
+    ; Obstacle in MIDDLE (24)
+    cmp cx, 15
+    je .choose_right        ; Coin in LEFT, fuel goes RIGHT
+    jmp .choose_left        ; Coin in RIGHT, fuel goes LEFT
+    
+.obstacle_right:
+    ; Obstacle in RIGHT (33)
+    cmp cx, 15
+    je .choose_middle       ; Coin in LEFT, fuel goes MIDDLE
+    jmp .choose_left        ; Coin in MIDDLE, fuel goes LEFT
+    
+.choose_left:
+    mov ax, 15
+    jmp .set_fuel_position
+    
+.choose_middle:
+    mov ax, 24
+    jmp .set_fuel_position
+    
+.choose_right:
+    mov ax, 33
+    
+.set_fuel_position:
+    mov [fuel_col], ax      ; Store the lane column for fuel icon
+    mov word [fuel_row], 2  ; Start at top of screen
+    mov byte [fuel_active], 1  ; Mark fuel as active/visible
     
     pop di
     pop cx
@@ -2759,43 +3332,121 @@ scrollbg:
     push bx
     push cx
     push dx
+    
     ; Draw static background elements once
     call draw_black_after_road
     call draw_brown_rectangle
     call draw_score_boxes
-   call display_fuel_score_bars
+    call display_fuel_score_bars
     
-
     call randomize_obstacle_car_lane
     mov word [carD_row], -3  ; Start off-screen (3 rows above)
     
     ; Initialize coin car at middle with random lane
     call randomize_coin_car_lane
-    mov word [coin_car_row], -2     ; Start at middle of screen
+    mov word [coin_car_row], -3     ; Start at middle of screen
+    
+    ; Initialize fuel icon position
+    mov word [fuel_row], -3
+    mov byte [show_fuel_icon], 0
     
     mov byte [divider_offset], 0      ; Initialize offset
     mov byte [blink_counter], 0       ; Initialize blink counter
     mov byte [blink_state], 1         ; Start with visible purple
-	mov ah,0
-    int 16h
-    
-    call hook_kbisr
-    
-scrollLoop:
-    ; Check if game is paused
-    cmp byte [game_paused], 1
-    je pause_loop
     
     call draw_road
     mov al, [divider_offset]
     call draw_lane_dividers_scroll
-    call draw_obstacle_car
-	cmp byte[coin_consumed],1
-	je dont_show_coin
-    call draw_coin_car
+    call draw_player_car
+    
+    mov ah, 0
+    int 16h
+    
+    call hook_kbisr
+    call hook_timer
+    
+scrollLoop:
+	cmp byte[add_score],1
+	jne .continue
+	add word[totalscore],30
+	mov byte[add_score],0
+	.continue:
+    ; Check if fuel depleted
+	push word[totalscore]
+	push 946
+	call print_number
 	
-	dont_show_coin:
-	call update_car_position
+	.check_rest
+    cmp byte [fuel_level], 0
+    jne fuel_ok
+    cmp byte [fuel_depleted], 0
+    jne fuel_ok             ; Already shown popup
+    
+    ; Show fuel ended popup
+    mov byte [fuel_depleted], 1
+    call draw_fuel_popup
+    
+    ; Wait 3 seconds (show popup)
+    mov cx, 54                  ; 3 seconds of timer delays
+.fuel_wait:
+    push cx
+    call delay
+    pop cx
+    loop .fuel_wait
+    
+    ; End game
+    mov byte [terminate], 1
+    jmp exit
+   
+fuel_ok:
+    ; Check if game is paused
+    cmp byte [game_paused], 1
+    jne .not_paused     ; Short jump to nearby label
+    jmp pause_loop      ; Long jump to pause_loop
+    
+.not_paused:
+    call draw_road
+    call display_fuel_score_bars
+    mov al, [divider_offset]
+    call draw_lane_dividers_scroll
+    
+    ; Handle fuel icon
+    cmp byte [show_fuel_icon], 1
+    jne draw_rest
+    
+    ; Check if this is a NEW spawn (fuel at starting position)
+    cmp word [fuel_row], -3
+    jne .already_spawned
+    mov byte[hide_fuel],0
+    ; New spawn - randomize position ONCE
+    call randomize_fuel
+    
+.already_spawned:
+    mov bx, [fuel_col]
+    mov dx, [fuel_row]
+	cmp byte[hide_fuel],1
+	je .next
+    call draw_fuel
+    .next
+    ; Move fuel down
+    add word [fuel_row], 1
+    
+    ; Check if fuel went off-screen
+    cmp word [fuel_row], 25
+    jbe draw_rest
+    
+    ; Reset fuel (don't randomize here - wait for ISR to set flag again)
+    mov byte [show_fuel_icon], 0
+    mov word [fuel_row], -3
+    
+draw_rest:
+    call draw_obstacle_car
+    cmp byte [coin_consumed], 1
+    je dont_show_coin	
+    call draw_coin_car
+    
+dont_show_coin:
+    call update_car_position
     call draw_player_car
     call check_collisions
     
@@ -2823,7 +3474,7 @@ scrollLoop:
     
     cmp ax, 25
     jl .coin_still_visible
-    mov byte[coin_consumed],0
+    mov byte [coin_consumed], 0
     call randomize_coin_car_lane
     mov word [coin_car_row], -2
     
@@ -2836,7 +3487,7 @@ scrollLoop:
 .no_reset:
     mov [divider_offset], al
     
-   cmp byte [game_paused], 1
+    cmp byte [game_paused], 1
     je toggle_pause
     jmp scrollLoop
     
@@ -2852,7 +3503,6 @@ toggle_pause:
     
 pause_loop:
     ; Wait for keypress while paused
-    
     
     ; Get the key
     mov ah, 0x00
@@ -2873,16 +3523,16 @@ pause_loop:
     ; Any other key, keep waiting
     jmp pause_loop
 exit:
-	call unhook_kbisr
-	call clear_keyboard_buffer
+    call unhook_kbisr
+    call clear_keyboard_buffer
     mov byte [game_paused], 0
-	mov byte[replay],0
-	mov byte[terminate],1
-	pop dx
+    mov byte [replay], 0
+    mov byte [terminate], 1
+    pop dx
     pop cx
     pop bx
     pop ax
-	ret
+    ret
 resume_game:
     ; Unpause - set flag to 0
     mov byte [game_paused], 0
@@ -2891,7 +3541,7 @@ resume_game:
     call draw_black_after_road
     call draw_brown_rectangle
     call draw_score_boxes
-   call display_fuel_score_bars
+    call display_fuel_score_bars
     
     jmp scrollLoop
 ;-----------------------------------------------------------------------------Pause pop up-----------------------------------------------------
@@ -2976,6 +3626,79 @@ draw_side_borders:
     mov dl, 30
     mov bl, 0x60            ; Black on brown
     mov si, no_option
+    call print_string
+    
+    popa
+    ret
+; draw_fuel_popup: Draw "FUEL ENDED!" popup
+draw_fuel_popup:
+    pusha
+    
+    ; Draw brown rectangle (same position as pause popup)
+    mov dh, 7               ; Start row
+    mov dl, 12              ; Start col
+    mov ch, 17              ; End row
+    mov cl, 39              ; End col
+    mov al, ' '
+    mov bl, 0x66            ; Brown on brown
+    call fill_region
+    
+    ; Draw border - top edge
+    mov dh, 7
+    mov dl, 12
+    mov al, 0xC9            ; ╔
+    mov bl, 0x06
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26
+.draw_top:
+    mov al, 0xCD            ; ═
+    call write_char
+    inc dl
+    loop .draw_top
+    
+    mov dl, 39
+    mov al, 0xBB            ; ╗
+    call write_char
+    
+    ; Draw border - bottom edge
+    mov dh, 17
+    mov dl, 12
+    mov al, 0xC8            ; ╚
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26
+.draw_bottom:
+    mov al, 0xCD
+    call write_char
+    inc dl
+    loop .draw_bottom
+    
+    mov dl, 39
+    mov al, 0xBC            ; ╝
+    call write_char
+    
+    ; Draw side borders
+    mov dh, 8
+    mov cx, 9
+.draw_sides:
+    mov dl, 12
+    mov al, 0xBA            ; ║
+    call write_char
+    mov dl, 39
+    call write_char
+    inc dh
+    loop .draw_sides
+    
+	
+	
+    ; Print "FUEL ENDED!" text
+    mov dh, 12
+    mov dl, 19
+    mov bl, 0x60            ; Black on brown
+    mov si, fuel_ended_msg
     call print_string
     
     popa
@@ -3246,12 +3969,12 @@ play_again_msg:
     
 terminateL:
     ret
+	
 ; ========== MAIN PROGRAM ==========
 start:
 
     call screen1
 
-	call hook_timer
 game:
 	
 	push 0x0720
