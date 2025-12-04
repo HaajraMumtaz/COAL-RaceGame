@@ -120,6 +120,8 @@ title_line2: db ' | ____/ ___| / ___|  / \  |  _ \| ____|',0
 title_line3: db ' |  _| \___ \| |     / _ \ | |_) |  _|',0
 title_line4: db ' | |___ ___) | |___ / ___ \|  __/| |___',0
 title_line5: db ' |_____|____/ \____/_/   \_\_|   |_____|',0
+student1_id: db '0698', 0
+student2_id: db '0522', 0
 
 
 ; Car ASCII Art Data
@@ -202,6 +204,7 @@ Instructions_pause_atrb: dw 0x0C
 
 crash_msg: db ' CRASH! ', 0
 coin_plus_msg: db '+30 POINTS ADDED!!', 0  ; +100 followed by ☼ symbol
+crash_occurred db 0           ; Flag: 1 = crash popup shown
 ;------------------------------------------------------------------------------------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------Helpers---------------------------------------------------------------------------
 ;---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -743,20 +746,58 @@ print_string:
     ret
 ;-----------------------------------------game reset-------------------------------------------------------------------
 set_game:
-	mov byte[replay],1
-	mov byte[game_paused],0
-	mov al,[default_row]
-	mov byte[car_row],al
-	mov al,[default_col]
-	mov byte[car_col],al
-	mov word[carD_row], -2
-	mov word[coin_car_row], -2
-	mov byte[terminate],0
-	mov byte[fuel_level], 6      ; Reset fuel to full
-	mov word[fuel_timer], 0      ; Reset fuel timer
-	mov byte[fuel_depleted], 0   ; Reset fuel popup flag
-	
-	ret	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
+    ; Reset replay and game state flags
+    mov byte[replay],1              ; Keep replay flag set
+    mov byte[game_paused],0
+    mov byte[crash_occurred],0
+    mov byte[terminate],0
+mov word[totalscore], 0 
+    
+    ; Reset car position to default
+    mov al,[default_row]
+    mov byte[car_row],al            ; Reset to row 20
+    mov al,[default_col]
+    mov byte[car_col],al            ; Reset to column 24
+    
+    ; Reset car movement flags
+    mov byte[car_move_left],0
+    mov byte[car_move_right],0
+    mov byte[car_move_up],0
+    mov byte[car_move_down],0
+    
+    ; Reset obstacle positions (off-screen)
+    mov word[carD_row], -3          ; Match scrollbg initialization
+    mov word[coin_car_row], -3      ; Match scrollbg initialization
+    mov word[fuel_row], -3
+    
+    ; Reset coin/fuel collection flags
+    mov byte[coin_consumed],0
+    mov byte[hide_fuel],0
+    mov byte[show_fuel_icon],0
+    mov byte[fuel_active],0
+    mov byte[fuel_spawn_needed],0
+    
+    ; Reset fuel system
+    mov byte[fuel_level], 6         ; Full fuel (6 cells)
+    mov word[fuel_timer], 0
+    mov byte[fuel_depleted], 0
+    mov word[fuel_icon_timer],0
+    
+    ; Reset score and messaging
+    mov byte[msg_displaying],0
+    mov byte[add_score],0
+    mov word[clear_timer],0
+    
+    ; Reset visual animation variables
+    mov byte[divider_offset],0      ; Road divider scroll position
+    mov byte[blink_counter],0       ; Coin car blink counter
+    mov byte[blink_state],1         ; Start visible
+    
+    ; Reset timer/cooldown variables
+    mov word[countdown],0
+    mov word[lane_switch_cooldown],0
+    
+    ret	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
 ;------------maun func-------------
 
 screen1:
@@ -860,16 +901,33 @@ draw_escape_title:
     push cx
     push dx
     push si
-    
+
+
+    ; **ADD THIS - Print "0698" at row 3, columns 1-4**
+    mov dh, 3
+    mov dl, 1
+    mov si, student1_id
+    mov bl, 0x0E        ; yellow color
+    call print_string
+
     ; Draw title line 1 (row 3)
     mov dh, 3
     mov dl, 20
     mov si, title_line1
     mov bl, 0x0C        ; bright red on white
     call print_string
+
+; **ADD THIS - Print "0522" at row 4, columns 1-4**
+    mov dh, 4
+    mov dl, 1
+    mov si, student2_id
+    mov bl, 0x0E        ; yellow color
+    call print_string
+
     
     ; Draw title line 2 (row 4)
     mov dh, 4
+    mov dl, 20
     mov si, title_line2
     call print_string
     
@@ -1699,7 +1757,10 @@ check_obstacle_collision:
     jg .no_obstacle_collision       ; Obstacle too far right
     ; COLLISION DETECTED
     mov byte [terminate], 1
+    mov byte [crash_occurred], 1
+
     call crash_effect  
+
     
     ; Optional: Play crash sound or show explosion
     ; call play_crash_sound
@@ -1721,6 +1782,12 @@ check_coin_collision:
     push bx
     push cx
     push dx
+    
+    ; ═══════════════════════════════════════════════════════
+    ; NEW: CHECK IF COIN ALREADY CONSUMED FIRST
+    ; ═══════════════════════════════════════════════════════
+    cmp byte [coin_consumed], 1
+    je .no_coin_collision        ; Already collected, skip detection
     
     ; ─────────────────────────────────────────────────────────────
     ; STEP 1: Check vertical overlap
@@ -1765,9 +1832,9 @@ check_coin_collision:
     ; ─────────────────────────────────────────────────────────────
 
     ; Add score (example: +100 points)
-	mov byte[add_score],1
-	mov byte[coin_consumed],1
-	call coin_consumed_effect
+    mov byte[add_score],1
+    mov byte[coin_consumed],1
+    call coin_consumed_effect
     ; Optional: Update displayed score
     
 .no_coin_collision:
@@ -1775,8 +1842,7 @@ check_coin_collision:
     pop cx
     pop bx
     pop ax
-    ret
-	
+    ret	
 	
 check_fuel_collision:
     push ax
@@ -2828,7 +2894,7 @@ display_fuel_score_bars:
     ; Draw one horizontal cell at current row
     mov dl, 70                  ; Column 70
     mov bl, 0x0A                ; Green color
-    mov al, 0x5F                ; Underscore '_'
+    mov al, 0xDB               ; Underscore '_'
     
     call write_char             ; Column 70
     inc dl
@@ -2844,7 +2910,7 @@ display_fuel_score_bars:
     ; ===== DRAW LABELS BELOW BARS =====
     mov dh, 23                  ; Row below bars
     mov dl, 56                  ; FUEL label position
-    mov bl, 0x0F                ; White color
+    mov bl, 0x60                ; White color
     mov si, text_fuel
     call print_string
     
@@ -2998,7 +3064,6 @@ draw_fuel:
     pop ax
     ret
 
-╚═══╝
 	
 	;--------------------------------------------------------------------randomization-----------------------------------
 
@@ -3332,6 +3397,17 @@ scrollbg:
     push bx
     push cx
     push dx
+;✅ ADD THIS: Unhook any existing ISRs first (in case of restart)
+    ; Check if this is a replay by checking if ISRs might be hooked
+    cmp byte [replay], 1
+    jne .first_run
+    
+    ; On replay, make sure old ISRs are unhooked
+    call unhook_kbisr
+    call unhook_timer
+    call clear_keyboard_buffer    ; ← Clear any stuck keys
+    
+.first_run:
     
     ; Draw static background elements once
     call draw_black_after_road
@@ -3399,6 +3475,27 @@ scrollLoop:
     jmp exit
    
 fuel_ok:
+    ; Check if crashed
+    cmp byte [terminate], 1
+    jne crash_ok                 ; If NOT crashed, skip to crash_ok
+    cmp byte [crash_occurred], 1
+    jne crash_ok                 ; If crash flag NOT set, skip to crash_ok
+    
+    ; Show crash popup
+    call draw_crash_popup
+    
+    ; Wait 3 seconds (show popup)
+    mov cx, 54                  ; 3 seconds of timer delays
+.crash_wait:
+    push cx
+    call delay
+    pop cx
+    loop .crash_wait
+    
+    ; End game
+    jmp exit
+   
+crash_ok:
     ; Check if game is paused
     cmp byte [game_paused], 1
     jne .not_paused     ; Short jump to nearby label
@@ -3451,8 +3548,8 @@ dont_show_coin:
     call check_collisions
     
     ; Check if game over (crashed into obstacle)
-    cmp byte [terminate], 1
-    je exit
+    ;cmp byte [terminate], 1
+    ;je exit
     xor byte [blink_state], 1
     
     call delay
@@ -3526,7 +3623,7 @@ exit:
     call unhook_kbisr
     call clear_keyboard_buffer
     mov byte [game_paused], 0
-    mov byte [replay], 0
+    ;mov byte [replay], 0
     mov byte [terminate], 1
     pop dx
     pop cx
@@ -3699,6 +3796,77 @@ draw_fuel_popup:
     mov dl, 19
     mov bl, 0x60            ; Black on brown
     mov si, fuel_ended_msg
+    call print_string
+    
+    popa
+    ret
+; draw_crash_popup: Draw "CRASH!" popup
+draw_crash_popup:
+    pusha
+    
+    ; Draw brown rectangle (same position as pause popup)
+    mov dh, 7               ; Start row
+    mov dl, 12              ; Start col
+    mov ch, 17              ; End row
+    mov cl, 39              ; End col
+    mov al, ' '
+    mov bl, 0x66            ; Brown on brown
+    call fill_region
+    
+    ; Draw border - top edge
+    mov dh, 7
+    mov dl, 12
+    mov al, 0xC9            ; ╔
+    mov bl, 0x06
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26
+.draw_top:
+    mov al, 0xCD            ; ═
+    call write_char
+    inc dl
+    loop .draw_top
+    
+    mov dl, 39
+    mov al, 0xBB            ; ╗
+    call write_char
+    
+    ; Draw border - bottom edge
+    mov dh, 17
+    mov dl, 12
+    mov al, 0xC8            ; ╚
+    call write_char
+    
+    mov dl, 13
+    mov cx, 26
+.draw_bottom:
+    mov al, 0xCD
+    call write_char
+    inc dl
+    loop .draw_bottom
+    
+    mov dl, 39
+    mov al, 0xBC            ; ╝
+    call write_char
+    
+    ; Draw side borders
+    mov dh, 8
+    mov cx, 9
+.draw_sides:
+    mov dl, 12
+    mov al, 0xBA            ; ║
+    call write_char
+    mov dl, 39
+    call write_char
+    inc dh
+    loop .draw_sides
+    
+    ; Print "CRASH!" text in center
+    mov dh, 12
+    mov dl, 22
+    mov bl, 0x60           
+    mov si, crash_msg
     call print_string
     
     popa
@@ -3979,7 +4147,7 @@ game:
 	
 	push 0x0720
     call clrscr
-    call drawBg
+    ;call drawBg
     call scrollbg  
     call screenEnd
 	cmp byte[replay],1
