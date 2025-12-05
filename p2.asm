@@ -37,7 +37,7 @@ fuel_rev_msg: db 'FUEL LEVEL IS BACK UP!'
 ;TIMER VARIABLES
 countdown dw 0
 lane_switch_cooldown dw 0        ; Counter in timer ticks
-COOLDOWN_TIME equ 48      ; 2 seconds worth of ticks
+COOLDOWN_TIME equ 36      ; 2 seconds worth of ticks
 ;flags + car movement
 car_move_left: db 0
 car_move_right: db 0
@@ -205,6 +205,81 @@ Instructions_pause_atrb: dw 0x0C
 crash_msg: db ' CRASH! ', 0
 coin_plus_msg: db '+30 POINTS ADDED!!', 0  ; +100 followed by ☼ symbol
 crash_occurred db 0           ; Flag: 1 = crash popup shown
+
+;--------------------------------------multi tasking-----------------------------------------
+currentTask: db 0           ; 0 = Game task, 1 = Music task
+
+; Task Control Blocks
+mainTask:
+    .ax: dw 0
+    .bx: dw 0
+    .cx: dw 0
+    .dx: dw 0
+    .si: dw 0
+    .di: dw 0
+    .bp: dw 0
+    .sp: dw 0
+    .ss: dw 0
+    .ds: dw 0
+    .es: dw 0
+
+musicTask:
+    .ax: dw 0
+    .bx: dw 0
+    .cx: dw 0
+    .dx: dw 0
+    .si: dw 0
+    .di: dw 0
+    .bp: dw 0
+    .sp: dw 0
+    .ss: dw 0
+    .ds: dw 0
+    .es: dw 0
+
+; Separate stacks for multitasking
+mainStack: times 256 dw 0
+mainStackEnd:
+
+musicStack: times 256 dw 0
+musicStackEnd:
+
+switchCounter: dw 0
+musicEnabled: db 1          ; Set to 0 to disable music
+
+
+; ===================================================================
+; MUSIC DATA
+; ===================================================================
+; Engine sound frequencies - smooth transitions
+ENGINE_IDLE     equ 200      ; Low rumble (idle engine)
+ENGINE_LOW      equ 250      ; Low speed
+ENGINE_MID      equ 350      ; Mid speed
+ENGINE_HIGH     equ 500      ; High speed
+ENGINE_REV      equ 700      ; Revving
+NOTE_REST       equ 0
+
+; Smooth engine loop - sounds like continuous car driving
+melody:
+    ; Idle to acceleration (smooth ramp up)
+    dw ENGINE_IDLE, 36       ; Long low rumble
+    dw ENGINE_LOW, 36        ; Building up
+    dw ENGINE_MID, 36        ; Getting faster
+    dw ENGINE_HIGH, 72       ; Cruising speed (longer)
+    dw ENGINE_MID, 36        ; Slight deceleration
+    dw ENGINE_HIGH, 72       ; Back to cruising
+    
+    ; Light variation to avoid monotony
+    dw ENGINE_HIGH, 54
+    dw ENGINE_REV, 18        ; Quick rev
+    dw ENGINE_HIGH, 54
+    
+    ; Continuous loop back to cruising
+    dw ENGINE_MID, 36
+    dw ENGINE_HIGH, 72
+    
+    dw 0xFFFF                ; Loop back
+noteIndex: dw 0
+noteTimer: dw 0
 ;------------------------------------------------------------------------------------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------Helpers---------------------------------------------------------------------------
 ;---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -410,7 +485,7 @@ print_number_at:
 	inner_delay:
 		nop
 		nop
-		nop
+		
 		loop inner_delay
 		
 		pop cx
@@ -556,8 +631,218 @@ kb_done:
     pop ax
     jmp far [cs:oldisr]
 
-; HOOK KEYBOARD INTERRUPT
 
+; CLEAR KEYBOARD BUFFER
+
+clear_keyboard_buffer:
+    push ax
+clear_kb_loop:
+    in al, 0x64         ; Read keyboard controller status port
+    test al, 1          ; Check if output buffer has data (bit 0)
+    jz clear_done       ; If no data, buffer is clear
+    in al, 0x60         ; Read and discard the keystroke from data port
+    jmp clear_kb_loop   ; Check again
+clear_done:
+    pop ax
+    ret
+
+; TIMER ISR
+
+new_timer_isr:
+    push ax
+    push bx
+    push ds
+    
+    mov ax, cs
+    mov ds, ax
+    
+    ; === YOUR EXISTING TIMER CODE ===
+    add word [fuel_icon_timer], 1
+    cmp word [lane_switch_cooldown], 0
+    je .no_cooldown
+    dec word [lane_switch_cooldown]
+    
+.no_cooldown:
+    inc word [fuel_timer]
+    mov ax, [fuel_timer]
+    cmp ax, FUEL_TICK_RATE
+    jb .no_fuel_update
+    
+    mov word [fuel_timer], 0
+    mov al, [fuel_level]
+    cmp al, 0
+    je .no_fuel_update
+    sub al, 2
+    jns .store_fuel
+    xor al, al
+    
+.store_fuel:
+    mov [fuel_level], al
+
+.no_fuel_update:
+    mov ax, [fuel_icon_timer]
+    cmp ax, 100
+    je .set_spawn_flag
+    cmp ax, 180
+    je .set_spawn_flag
+    jmp .check_multitask
+    
+.set_spawn_flag:
+    mov byte [show_fuel_icon], 1
+
+.check_multitask:
+    ; === MULTITASKING CODE - Check if we should switch tasks ===
+    cmp byte [musicEnabled], 0
+    je .no_switch
+    
+    inc word [switchCounter]
+    cmp word [switchCounter], 2     ; Switch every 2 ticks
+    jb .no_switch
+    
+    mov word [switchCounter], 0
+    
+    ; Determine which task to save
+    cmp byte [currentTask], 0
+    je .saveMain
+    
+.saveMusic:
+    ; Save music task state
+    pop word [musicTask.ds]
+    pop word [musicTask.bx]
+    pop word [musicTask.ax]
+    
+    mov [musicTask.cx], cx
+    mov [musicTask.dx], dx
+    mov [musicTask.si], si
+    mov [musicTask.di], di
+    mov [musicTask.bp], bp
+    mov [musicTask.sp], sp
+    mov [musicTask.ss], ss
+    mov ax, es
+    mov [musicTask.es], ax
+    
+    ; Switch to main task
+    mov byte [currentTask], 0
+    
+    mov ax, [mainTask.ss]
+    mov ss, ax
+    mov sp, [mainTask.sp]
+    
+    mov ax, [mainTask.ds]
+    mov ds, ax
+    mov ax, [mainTask.es]
+    mov es, ax
+    
+    mov ax, [mainTask.ax]
+    mov bx, [mainTask.bx]
+    mov cx, [mainTask.cx]
+    mov dx, [mainTask.dx]
+    mov si, [mainTask.si]
+    mov di, [mainTask.di]
+    mov bp, [mainTask.bp]
+    
+    jmp .done
+    
+.saveMain:
+    ; Save main task state
+    pop word [mainTask.ds]
+    pop word [mainTask.bx]
+    pop word [mainTask.ax]
+    
+    mov [mainTask.cx], cx
+    mov [mainTask.dx], dx
+    mov [mainTask.si], si
+    mov [mainTask.di], di
+    mov [mainTask.bp], bp
+    mov [mainTask.sp], sp
+    mov [mainTask.ss], ss
+    mov ax, es
+    mov [mainTask.es], ax
+    
+    ; Switch to music task
+    mov byte [currentTask], 1
+    
+    mov ax, [musicTask.ss]
+    mov ss, ax
+    mov sp, [musicTask.sp]
+    
+    mov ax, [musicTask.ds]
+    mov ds, ax
+    mov ax, [musicTask.es]
+    mov es, ax
+    
+    mov ax, [musicTask.ax]
+    mov bx, [musicTask.bx]
+    mov cx, [musicTask.cx]
+    mov dx, [musicTask.dx]
+    mov si, [musicTask.si]
+    mov di, [musicTask.di]
+    mov bp, [musicTask.bp]
+    
+    jmp .done
+    
+.no_switch:
+    pop ds
+    pop bx
+    pop ax
+    
+.done:
+    ; Chain to original DOS timer (this was missing!)
+    pushf
+    call far [cs:old_timer]
+    iret
+
+
+	
+; ===================================================================
+; MUSIC TASK - Runs in background
+; ===================================================================
+musicProcess:
+    mov ax, cs
+    mov ds, ax
+    
+.loop:
+    cmp byte [musicEnabled], 0
+    je .exit
+    
+    dec word [noteTimer]
+    jnz .wait
+    
+    mov bx, [noteIndex]
+    mov ax, [melody + bx]
+    
+    cmp ax, 0xFFFF
+    jne .notEnd
+    xor bx, bx
+    mov [noteIndex], bx
+    mov ax, [melody + bx]
+    
+.notEnd:
+    cmp ax, NOTE_REST
+    je .rest
+    call playTone
+    jmp .setDuration
+    
+.rest:
+    call stopTone
+    
+.setDuration:
+    mov ax, [melody + bx + 2]
+    mov [noteTimer], ax
+    add bx, 4
+    mov [noteIndex], bx
+    
+.wait:
+    mov cx, 0x1000
+.delay:
+    loop .delay
+    jmp .loop
+    
+.exit:
+    call stopTone
+    jmp $
+; HOOK FUNCTIONS
+; ===================================================================
 hook_kbisr:
     push es
     push ax
@@ -577,8 +862,6 @@ hook_kbisr:
     pop ax
     pop es
     ret
-
-; UNHOOK KEYBOARD INTERRUPT
 
 unhook_kbisr:
     push es
@@ -600,69 +883,6 @@ unhook_kbisr:
     pop es
     ret
 
-; CLEAR KEYBOARD BUFFER
-
-clear_keyboard_buffer:
-    push ax
-clear_kb_loop:
-    in al, 0x64         ; Read keyboard controller status port
-    test al, 1          ; Check if output buffer has data (bit 0)
-    jz clear_done       ; If no data, buffer is clear
-    in al, 0x60         ; Read and discard the keystroke from data port
-    jmp clear_kb_loop   ; Check again
-clear_done:
-    pop ax
-    ret
-
-; TIMER ISR
-
-new_timer_isr:
-    push ax
-    push bx
-    add word [cs:fuel_icon_timer], 1
-    cmp word [cs:lane_switch_cooldown], 0
-    je .no_cooldown
-    dec word [cs:lane_switch_cooldown]
-    
-.no_cooldown:
-    ; Handle fuel depletion timer
-    inc word [cs:fuel_timer]
-    mov ax, [cs:fuel_timer]
-    cmp ax, FUEL_TICK_RATE
-    jb .no_fuel_update
-    
-    mov word [cs:fuel_timer], 0
-    
-    mov al, [cs:fuel_level]
-    cmp al, 0
-    je .no_fuel_update
-    
-    sub al, 2
-    jns .store_fuel
-    xor al, al
-    
-.store_fuel:
-    mov [cs:fuel_level], al
-
-.no_fuel_update:
-    mov ax, [cs:fuel_icon_timer]
-    cmp ax, 210
-    je .set_spawn_flag
-    cmp ax, 320
-    je .set_spawn_flag
-    jmp .return_isr
-    
-.set_spawn_flag:
-    mov byte [cs:show_fuel_icon], 1   ; Just set the flag!
-    
-.return_isr:
-    pop bx
-    pop ax
-    jmp far [cs:old_timer]
-
-
-; HOOK TIMER INTERRUPT
-
 hook_timer:
     push es
     push ax
@@ -670,13 +890,11 @@ hook_timer:
     xor ax, ax
     mov es, ax
     
-    ; Save old timer ISR
     mov ax, [es:8*4]
     mov [old_timer], ax
     mov ax, [es:8*4+2]
     mov [old_timer+2], ax
     
-    ; Install new timer ISR
     cli
     mov word [es:8*4], new_timer_isr
     mov [es:8*4+2], cs
@@ -686,11 +904,12 @@ hook_timer:
     pop es
     ret
 
-; UNHOOK TIMER INTERRUPT
 unhook_timer:
     push es
     push ax
     push bx
+    
+    call stopTone
     
     xor ax, ax
     mov es, ax
@@ -706,7 +925,49 @@ unhook_timer:
     pop ax
     pop es
     ret
-; ============================================
+
+; ===================================================================
+; MULTITASKING SETUP
+; ===================================================================
+setupMultitasking:
+    ; Initialize main task (current state)
+    mov [mainTask.ss], ss
+    mov [mainTask.sp], sp
+    mov [mainTask.ds], ds
+    mov [mainTask.es], es
+    
+    ; Initialize music task
+    mov ax, cs
+    mov [musicTask.ss], ax
+    mov [musicTask.ds], ax
+    mov [musicTask.es], ax
+    
+    mov ax, musicStackEnd
+    mov [musicTask.sp], ax
+    
+    ; Set up music task initial stack frame
+    mov ax, cs
+    mov ss, ax
+    mov sp, musicStackEnd
+    
+    pushf
+    push cs
+    push word musicProcess
+    
+    mov [musicTask.sp], sp
+    
+    ; Restore main task stack
+    mov ax, [mainTask.ss]
+    mov ss, ax
+    mov sp, [mainTask.sp]
+    
+    ; Initialize music variables
+    mov word [noteIndex], 0
+    mov word [noteTimer], 1
+    
+    ret
+
+;=======================================
 ; SUBROUTINE: Print String
 ; Input: DH=row, DL=column, SI=string, BL=attribute
 ; ============================================
@@ -744,6 +1005,46 @@ print_string:
     pop bx
     pop ax
     ret
+	
+	
+;---------------------------------------------------music--------------------------------------------------------------
+; ===================================================================
+; PLAY TONE - Program PC Speaker
+; ===================================================================
+playTone:
+    push ax
+    push bx
+    
+    mov bx, ax
+    mov al, 0xB6
+    out 0x43, al
+    
+    mov ax, bx
+    out 0x42, al
+    mov al, ah
+    out 0x42, al
+    
+    in al, 0x61
+    or al, 0x03
+    out 0x61, al
+    
+    pop bx
+    pop ax
+    ret
+
+stopTone:
+    push ax
+    in al, 0x61
+    and al, 0xFC
+    out 0x61, al
+    pop ax
+    ret
+
+
+	; ===================================================================
+; SETUP MULTITASKING
+; ===================================================================
+
 ;-----------------------------------------game reset-------------------------------------------------------------------
 set_game:
     ; Reset replay and game state flags
@@ -1907,7 +2208,7 @@ check_fuel_collision:
     mov si, fuel_rev_msg
     call print_string
     
-    mov word[clear_timer],30
+    mov word[clear_timer],22
     ; Clear the message
     mov dh, 12
     mov dl, 56
@@ -4140,7 +4441,12 @@ terminateL:
 	
 ; ========== MAIN PROGRAM ==========
 start:
-
+	 ; Your existing initialization
+    call hook_kbisr
+    call hook_timer
+    
+    ; START MULTITASKING - Add this line!
+    call setupMultitasking
     call screen1
 
 game:
@@ -4155,9 +4461,11 @@ game:
 	call set_game
 	jmp game
 endGame:
-	call unhook_timer
 	push 0x0720
 	call clrscr
-	
+	mov byte [musicEnabled], 0
+    call unhook_timer        ; Your existing code
+    push 0x0720
+    call clrscr
     mov ax, 0x4c00
     int 0x21
