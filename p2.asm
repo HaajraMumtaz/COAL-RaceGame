@@ -681,9 +681,9 @@ new_timer_isr:
 
 .no_fuel_update:
     mov ax, [fuel_icon_timer]
-    cmp ax, 100
+    cmp ax, 170
     je .set_spawn_flag
-    cmp ax, 180
+    cmp ax, 175
     je .set_spawn_flag
     jmp .check_multitask
     
