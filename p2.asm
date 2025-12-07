@@ -258,83 +258,36 @@ musicStack: times 256 dw 0
 musicStackEnd:
 
 switchCounter: dw 0
-musicEnabled: db 1          ; Set to 0 to disable music
+
 
 
 ; ===================================================================
-; MUSIC DATA (Corrected Structure)
+; MUSIC DATA (Split Structure)
 ; ===================================================================
-NOTE_C3  EQU 130
-NOTE_E3  EQU 165
-NOTE_G3  EQU 196
-NOTE_A3  EQU 220
-NOTE_B3  EQU 247
-NOTE_C4  EQU 261
-NOTE_E4  EQU 329
-NOTE_G4  EQU 392
-NOTE_A4  EQU 440
-NOTE_D5  EQU 587
+; SIMPLE ENGINE LOOP
+; ===================================================================
+; Frequencies (Low rumble)
+FREQ_LOW   EQU 130 ; C3
+FREQ_MID   EQU 146 ; D3
+FREQ_HIGH  EQU 165 ; E3
 
-LEN_TINY  EQU 2   
-LEN_SHORT EQU 4   
-LEN_MED   EQU 8   
 
-NOTE_REST EQU 0
+melody_data:
+    ; Pattern: Two-tone siren effect
+    dw 440, 4   ; A4
+    dw 440, 4
+    dw 440, 4
+    dw 440, 4
+    dw 587, 4   ; D5 (High)
+    dw 587, 4
+    dw 587, 4
+    dw 587, 4
+MELODY_LIMIT EQU 32 
 
-melody:
-    ; ------------------------------------------------
-    ; PHASE 1: THE INTRO (Played once)
-    ; ------------------------------------------------
-    dw NOTE_E3, LEN_SHORT
-    dw NOTE_E3, LEN_SHORT
-    dw NOTE_A3, LEN_MED
-    dw NOTE_REST, LEN_TINY
-    
-    dw NOTE_G3, LEN_SHORT
-    dw NOTE_A3, LEN_SHORT
-    dw NOTE_C4, LEN_MED
-    dw NOTE_REST, LEN_TINY
-    
-    dw NOTE_C4, LEN_SHORT
-    dw NOTE_E4, LEN_SHORT
-    dw NOTE_G4, LEN_SHORT
-    dw NOTE_E4, LEN_SHORT
-
-    ; ------------------------------------------------
-    ; PHASE 2: THE LOOP (The driving beat)
-    ; ------------------------------------------------
-melody_loop_point:  ; <--- Logic will jump back here
-
-    ; -- Pattern A (Low Rumble) --
-    dw NOTE_E3, LEN_SHORT
-    dw NOTE_E3, LEN_SHORT
-    dw NOTE_A3, LEN_SHORT
-    dw NOTE_G3, LEN_SHORT
-
-    ; -- Pattern B (High Flutter) --
-    dw NOTE_E4, LEN_TINY
-    dw NOTE_D5, LEN_TINY
-    dw NOTE_E4, LEN_TINY
-    dw NOTE_B3, LEN_TINY
-    
-    ; -- Pattern C (The Drive) --
-    dw NOTE_C4, LEN_SHORT
-    dw NOTE_A3, LEN_SHORT
-    dw NOTE_G3, LEN_SHORT
-    dw NOTE_E3, LEN_SHORT
-
-    ; -- Pattern D (Turnaround) --
-    dw NOTE_E3, LEN_SHORT
-    dw NOTE_E3, LEN_TINY
-    dw NOTE_G3, LEN_TINY
-    dw NOTE_A3, LEN_SHORT
-
-    ; ------------------------------------------------
-    ; END MARKER
-    ; ------------------------------------------------
-    dw 0xFFFF  ; Logic detects this and jumps to melody_loop_point
 noteIndex: dw 0
-noteTimer: dw 0
+noteTimer: dw 1
+musicEnabled: db 1
+
 ;------------------------------------------------------------------------------------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------Helpers---------------------------------------------------------------------------
 ;---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -652,7 +605,7 @@ set_left:
     
 set_right:
     mov byte [car_move_right], 1
-    mov word [cs:lane_switch_cooldown], 36  ; Start cooldown
+    mov word [cs:lane_switch_cooldown], 30  ; Start cooldown
     jmp kb_done
     
 clear_left:
@@ -864,90 +817,68 @@ check:
 ; ===================================================================
 ; MUSIC TASK - Runs in background
 ; ===================================================================
-
 reset_music_task:
-    ; 1. Reset variables
     mov word [noteIndex], 0
     mov word [noteTimer], 1
     mov byte [musicEnabled], 1
-    mov byte [currentTask], 0      ; Ensure we start as Main Task
     
-    ; 2. Reset Music Stack Pointer to the very top
+    ; Reset Stack Pointer Logic (Keep your existing stack reset code here)
     mov ax, musicStackEnd
     mov [musicTask.sp], ax
-
-    ; 3. Manually rebuild the initial stack frame for the Music Task
-    ;    (This mimics what 'setupMultitasking' did originally)
     
-    ; We need to temporarily switch to the music stack to push initial values
-    mov bx, ss          ; Save current SS
-    mov cx, sp          ; Save current SP
-    
+    ; (Standard stack rebuild - copy from your previous working version)
+    mov bx, ss
+    mov cx, sp
     mov ax, cs
     mov ss, ax
     mov sp, musicStackEnd
-    
-    ; Push Initial State for iret/retf
-    pushf               ; Push Flags
-    push cs             ; Push Code Segment
-    push word musicProcess ; Push Instruction Pointer (Start of function)
-    
-    ; Save this new SP into the Task Control Block
+    pushf
+    push cs
+    push word musicProcess
     mov [musicTask.sp], sp
-    
-    ; Restore the Main Stack
     mov ss, bx
     mov sp, cx
     
     ret
 ; ===================================================================
 ; MUSIC TASK - SAFER LOOPING LOGIC
-; ===================================================================
 musicProcess:
     mov ax, cs
     mov ds, ax
     
 .loop:
+    ; 1. Check if Music is Enabled
     cmp byte [musicEnabled], 0
     je .exit
     
+    ; 2. Handle Duration Timer
     dec word [noteTimer]
-    jnz .wait
+    jnz .wait_loop
     
+    ; 3. BOUNDS CHECK (The Safety Net)
     mov bx, [noteIndex]
-    mov ax, [melody + bx]
+    cmp bx, MELODY_LIMIT    ; Have we reached the end (32)?
+    jb .read_note           ; If Index < 32, it's safe to read
     
-    ; --- CHECK FOR END OF SONG (0xFFFF) ---
-    cmp ax, 0xFFFF
-    jne .play
-    
-    ; If we hit end, DO NOT reset to 0. 
-    ; Reset to the 'melody_loop_point' offset instead.
-    mov bx, (melody_loop_point - melody) 
+    mov bx, 0               ; If Index >= 32, RESET TO 0 immediately
     mov [noteIndex], bx
-    jmp .loop             ; Restart immediately from loop point
     
-.play:
-    cmp ax, NOTE_REST
-    je .rest
+.read_note:
+    ; 4. Read Frequency
+    mov ax, [melody_data + bx]
     call playTone
-    jmp .setDuration
     
-.rest:
-    call stopTone
-    
-.setDuration:
-    ; Read duration
-    mov ax, [melody + bx + 2]
+    ; 5. Read Duration
+    mov ax, [melody_data + bx + 2]
     mov [noteTimer], ax
     
-    ; Move to next note (4 bytes)
+    ; 6. Advance Index (Next Note)
     add bx, 4
     mov [noteIndex], bx
     
-.wait:
-    ; Speed control (Higher = Slower song)
-    mov cx, 0x4000      
+.wait_loop:
+    ; 7. Delay for Speed (Adjust this 0x4000 if too fast/slow)
+    mov cx, 0x4000
 .delay:
     loop .delay
     jmp .loop
