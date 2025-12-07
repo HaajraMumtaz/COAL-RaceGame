@@ -89,6 +89,7 @@ exit_game: db 'ESC - Exit Game', 0
 decoration: db '================================', 0
 ; Sample score
 totalscore: dw 0
+highest_score: dw 0
 ; Keyboard status
 ; Old ISR storag
 oldisr: dd 0
@@ -217,6 +218,8 @@ crash_msg: db ' CRASH! ', 0
 coin_plus_msg: db '+30 POINTS ADDED!!', 0  ; +100 followed by ☼ symbol
 crash_occurred db 0           ; Flag: 1 = crash popup shown
 
+
+score_inc_timer: dw 54
 ;--------------------------------------multi tasking-----------------------------------------
 currentTask: db 0           ; 0 = Game task, 1 = Music task
 
@@ -271,23 +274,25 @@ NOTE_REST       equ 0
 
 ; Smooth engine loop - sounds like continuous car driving
 melody:
-    ; Idle to acceleration (smooth ramp up)
-    dw ENGINE_IDLE, 36       ; Long low rumble
-    dw ENGINE_LOW, 36        ; Building up
-    dw ENGINE_MID, 36        ; Getting faster
-    dw ENGINE_HIGH, 72       ; Cruising speed (longer)
-    dw ENGINE_MID, 36        ; Slight deceleration
-    dw ENGINE_HIGH, 72       ; Back to cruising
-    
-    ; Light variation to avoid monotony
-    dw ENGINE_HIGH, 54
-    dw ENGINE_REV, 18        ; Quick rev
-    dw ENGINE_HIGH, 54
-    
-    ; Continuous loop back to cruising
-    dw ENGINE_MID, 36
-    dw ENGINE_HIGH, 72
-    
+	; --- Frequency Definitions (in Hz) ---
+	NOTE_C2  EQU 65
+	NOTE_E2  EQU 82
+	NOTE_G2  EQU 98
+	NOTE_A2  EQU 110
+	NOTE_C3  EQU 130
+	NOTE_E3  EQU 165
+	NOTE_G3  EQU 196
+	NOTE_B3  EQU 247
+	NOTE_C4  EQU 261
+	NOTE_D4  EQU 293
+	NOTE_E4  EQU 329
+	NOTE_G4  EQU 392
+
+	; --- Duration Constants (Adjust based on your playback speed) ---
+	LEN_TINY EQU 3   ; Very fast (engine flutter)
+	LEN_SHORT EQU 6  ; Fast notes
+	LEN_MED   EQU 12 ; Standard beat
+	LEN_LONG  EQU 24 ; Sustained notes
     dw 0xFFFF                ; Loop back
 noteIndex: dw 0
 noteTimer: dw 0
@@ -672,7 +677,7 @@ new_timer_isr:
     cmp word [lane_switch_cooldown], 0
     je .no_cooldown
     dec word [lane_switch_cooldown]
-    
+
 .no_cooldown:
     inc word [fuel_timer]
     mov ax, [fuel_timer]
@@ -703,6 +708,14 @@ new_timer_isr:
 
 .check_multitask:
     ; === MULTITASKING CODE - Check if we should switch tasks ===
+	cmp word[score_inc_timer],0
+	je add_sc
+	dec word[score_inc_timer]
+	jmp check
+	add_sc:
+	add word[totalscore],10
+	mov word[score_inc_timer],54
+check:
     cmp byte [musicEnabled], 0
     jne .continue_check
     jmp .no_switch
@@ -1065,7 +1078,7 @@ set_game:
     mov byte[game_paused],0
     mov byte[crash_occurred],0
     mov byte[terminate],0
-mov word[totalscore], 0 
+	mov word[totalscore], 0 
     
     ; Reset car position to default
     mov al,[default_row]
@@ -3110,6 +3123,10 @@ draw_score_boxes:
 		mov dl,70
 		mov si,score_text
 		call print_string
+		push 5
+		push 58
+		push word[highest_score]
+		call print_number_at
 	s_done:
 		mov dh, 3
 		mov dl, 53
@@ -3796,7 +3813,7 @@ scrollLoop:
     call draw_fuel_popup
     
     ; Wait 3 seconds (show popup)
-    mov cx, 54                  ; 3 seconds of timer delays
+    mov cx, 13                  ; 3 seconds of timer delays
 .fuel_wait:
     push cx
     call delay
@@ -3817,13 +3834,7 @@ fuel_ok:
     ; Show crash popup
     call draw_crash_popup
     
-    ; Wait 3 seconds (show popup)
-    mov cx, 54                  ; 3 seconds of timer delays
-.crash_wait:
-    push cx
-    call delay
-    pop cx
-    loop .crash_wait
+	call delay
     
     ; End game
     jmp exit
@@ -3974,12 +3985,9 @@ resume_game:
     call display_fuel_score_bars
     
     jmp scrollLoop
-;-----------------------------------------------------------------------------POP UPs-----------------------------------------------------
-; draw_pause_popup: Draw brown pause popup in center of screen
-draw_pause_popup:
-    pusha
-    
-    ; Draw brown rectangle in center (rows 7-17, cols 12-39)
+	
+drawBase:
+	    ; Draw brown rectangle in center (rows 7-17, cols 12-39)
     mov dh, 7               ; Start row
     mov dl, 12              ; Start col
     mov ch, 17              ; End row
@@ -4036,6 +4044,13 @@ draw_side_borders:
     call write_char
     inc dh
     loop draw_side_borders
+	ret
+;-----------------------------------------------------------------------------POP UPs-----------------------------------------------------
+; draw_pause_popup: Draw brown pause popup in center of screen
+draw_pause_popup:
+    pusha
+    
+	call drawBase
     
     ; Print "Do you want to exit?" text in black
     mov dh, 10
@@ -4064,65 +4079,7 @@ draw_side_borders:
 draw_fuel_popup:
     pusha
     
-    ; Draw brown rectangle (same position as pause popup)
-    mov dh, 7               ; Start row
-    mov dl, 12              ; Start col
-    mov ch, 17              ; End row
-    mov cl, 39              ; End col
-    mov al, ' '
-    mov bl, 0x66            ; Brown on brown
-    call fill_region
-    
-    ; Draw border - top edge
-    mov dh, 7
-    mov dl, 12
-    mov al, 0xC9            ; ╔
-    mov bl, 0x06
-    call write_char
-    
-    mov dl, 13
-    mov cx, 26
-.draw_top:
-    mov al, 0xCD            ; ═
-    call write_char
-    inc dl
-    loop .draw_top
-    
-    mov dl, 39
-    mov al, 0xBB            ; ╗
-    call write_char
-    
-    ; Draw border - bottom edge
-    mov dh, 17
-    mov dl, 12
-    mov al, 0xC8            ; ╚
-    call write_char
-    
-    mov dl, 13
-    mov cx, 26
-.draw_bottom:
-    mov al, 0xCD
-    call write_char
-    inc dl
-    loop .draw_bottom
-    
-    mov dl, 39
-    mov al, 0xBC            ; ╝
-    call write_char
-    
-    ; Draw side borders
-    mov dh, 8
-    mov cx, 9
-.draw_sides:
-    mov dl, 12
-    mov al, 0xBA            ; ║
-    call write_char
-    mov dl, 39
-    call write_char
-    inc dh
-    loop .draw_sides
-    
-	
+    call drawBase
 	
     ; Print "FUEL ENDED!" text
     mov dh, 12
@@ -4138,62 +4095,7 @@ draw_crash_popup:
     pusha
     
     ; Draw brown rectangle (same position as pause popup)
-    mov dh, 7               ; Start row
-    mov dl, 12              ; Start col
-    mov ch, 17              ; End row
-    mov cl, 39              ; End col
-    mov al, ' '
-    mov bl, 0x66            ; Brown on brown
-    call fill_region
-    
-    ; Draw border - top edge
-    mov dh, 7
-    mov dl, 12
-    mov al, 0xC9            ; ╔
-    mov bl, 0x06
-    call write_char
-    
-    mov dl, 13
-    mov cx, 26
-.draw_top:
-    mov al, 0xCD            ; ═
-    call write_char
-    inc dl
-    loop .draw_top
-    
-    mov dl, 39
-    mov al, 0xBB            ; ╗
-    call write_char
-    
-    ; Draw border - bottom edge
-    mov dh, 17
-    mov dl, 12
-    mov al, 0xC8            ; ╚
-    call write_char
-    
-    mov dl, 13
-    mov cx, 26
-.draw_bottom:
-    mov al, 0xCD
-    call write_char
-    inc dl
-    loop .draw_bottom
-    
-    mov dl, 39
-    mov al, 0xBC            ; ╝
-    call write_char
-    
-    ; Draw side borders
-    mov dh, 8
-    mov cx, 9
-.draw_sides:
-    mov dl, 12
-    mov al, 0xBA            ; ║
-    call write_char
-    mov dl, 39
-    call write_char
-    inc dh
-    loop .draw_sides
+  call drawBase
     
     ; Print "CRASH!" text in center
     mov dh, 12
@@ -4793,6 +4695,18 @@ input_screen:
 	push 0x0720
     call clrscr
     ret
+	
+update_score:
+	mov ax,[totalscore]
+	cmp ax,[highest_score]
+	jb noUpdate
+	mov word[highest_score],ax
+	push 5
+	push 58
+	push word[highest_score]
+	call print_number_at
+	noUpdate:
+	ret
 ;==================== END INPUT SCREEN ====================
 	
 ; ========== MAIN PROGRAM ==========
@@ -4805,6 +4719,7 @@ game:
     call screenEnd
 	cmp byte[replay],1
 	jne endGame
+	call update_score
 	call set_game
 	jmp game
 endGame:
