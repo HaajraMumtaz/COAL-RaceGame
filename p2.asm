@@ -29,6 +29,16 @@ blink_state db 1        ; 1 = visible, 0 = invisible
 not_visible_row: db -2
 temp_row db 1           ; Temporary storage for calculations
 temp_col db 1
+; ===== INPUT SCREEN DATA (ADD AFTER LINE 47) =====
+input_name: times 20 db 0       ; Store player name (max 20 chars)
+input_roll: times 10 db 0       ; Store roll number (max 10 chars)
+name_length: db 0               ; Current length of name
+roll_length: db 0               ; Current length of roll number
+
+; Input screen strings
+prompt_name: db 'Name:', 0
+prompt_roll: db 'Roll Number:', 0
+input_instruction: db 'Press ENTER to continue', 0
 
 ; ===== DATA SECTION =====
 text_fuel:  db 'FUEL', 0
@@ -73,6 +83,7 @@ trophy9: db '     ===========        ', 0
 
 ; Text strings
 score_label: db 'YOUR SCORE: ', 0
+score_suffix: db "'s Score: ", 0     ; ← ADD THIS LINE
 play_again: db 'P - Play Again', 0
 exit_game: db 'ESC - Exit Game', 0
 decoration: db '================================', 0
@@ -681,9 +692,9 @@ new_timer_isr:
 
 .no_fuel_update:
     mov ax, [fuel_icon_timer]
-    cmp ax, 170
+    cmp ax, 100
     je .set_spawn_flag
-    cmp ax, 175
+    cmp ax, 180
     je .set_spawn_flag
     jmp .check_multitask
     
@@ -693,18 +704,22 @@ new_timer_isr:
 .check_multitask:
     ; === MULTITASKING CODE - Check if we should switch tasks ===
     cmp byte [musicEnabled], 0
-    je .no_switch
+    jne .continue_check
+    jmp .no_switch
     
+.continue_check:
     inc word [switchCounter]
     cmp word [switchCounter], 2     ; Switch every 2 ticks
-    jb .no_switch
+    jae .do_switch
+    jmp .no_switch
     
+.do_switch:
     mov word [switchCounter], 0
     
     ; Determine which task to save
     cmp byte [currentTask], 0
     je .saveMain
-    
+    ; ... rest of code    
 .saveMusic:
     ; Save music task state
     pop word [musicTask.ds]
@@ -1041,9 +1056,7 @@ stopTone:
     ret
 
 
-	; ===================================================================
-; SETUP MULTITASKING
-; ===================================================================
+
 
 ;-----------------------------------------game reset-------------------------------------------------------------------
 set_game:
@@ -1098,11 +1111,24 @@ mov word[totalscore], 0
     mov word[countdown],0
     mov word[lane_switch_cooldown],0
     
-    ret	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
+    ret	
+	
+	clear_game:
+		push 0x0720
+		call clrscr
+		mov byte [musicEnabled], 0
+		call unhook_timer        ; Your existing code
+		push 0x0720
+		call clrscr
+	ret
+	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
 ;------------maun func-------------
 
 screen1:
-			mov ax, 0xb800
+		call hook_kbisr
+		call hook_timer
+		call setupMultitasking
+		mov ax, 0xb800
 		mov es, ax
 		; Clear screen (WHITE BACKGROUND)
 		push 0x0720
@@ -1848,6 +1874,7 @@ instructions_printing:
     push bx
     push dx
     call print_string_ins
+
     
     pop dx
     pop bx
@@ -1939,7 +1966,7 @@ instructions_page:
     
 delay_loopx:
     push cx
-    mov cx, 0xFFFF
+    mov cx, 0x2FFF
 delay_loopy:
     loop delay_loopy
     pop cx
@@ -1980,6 +2007,8 @@ cont_delay_loop:
     sub cx, 1
     cmp cx, 0
     ja delay_loopx
+    mov word [fuel_timer], 0     ; Reset fuel timer to start fresh
+
 
     pop di
     pop dx
@@ -3709,6 +3738,9 @@ scrollbg:
     call clear_keyboard_buffer    ; ← Clear any stuck keys
     
 .first_run:
+mov word [fuel_timer], 0
+
+
     
     ; Draw static background elements once
     call draw_black_after_road
@@ -3942,7 +3974,7 @@ resume_game:
     call display_fuel_score_bars
     
     jmp scrollLoop
-;-----------------------------------------------------------------------------Pause pop up-----------------------------------------------------
+;-----------------------------------------------------------------------------POP UPs-----------------------------------------------------
 ; draw_pause_popup: Draw brown pause popup in center of screen
 draw_pause_popup:
     pusha
@@ -4317,19 +4349,36 @@ screenEndprep:
     call fill_row
     call curtain_delay
     
-    ; Row 13: score
+    ; Row 13: score with player name
     mov al, 13
     call fill_row
+    
+    ; Print player name first
     push 13
-    push 34
+    push 25              ; Start further left to fit name
     push 0x0E
-    push score_label
+    push input_name
     call print_string_color
-    push 13
-    push 46
+    
+    ; Print "'s Score: " after the name
+    mov dh, 13
+    mov dl, 25
+    movzx ax, byte [name_length]
+    add dl, al           ; Move cursor after name
+    mov si, score_suffix
+    mov bl, 0x0E
+    call print_string
+    
+    ; Calculate position for score number
+    movzx ax, byte [name_length]
+    add ax, 25           ; Base position
+    add ax, 11           ; Length of "'s Score: "
+    push 13              ; Row
+    push ax              ; Dynamic column
     push word [totalscore]
     call print_number_at
     call curtain_delay
+
     
     ; Row 14: empty
     mov al, 14
@@ -4438,22 +4487,320 @@ play_again_msg:
     
 terminateL:
     ret
+;==================== INPUT SCREEN FUNCTION ====================
+input_screen:
+    pusha
+    
+    ; Clear screen to black
+    push 0x0720
+    call clrscr
+    
+    ; ===== DRAW NAME BOX (Centered at row 8) =====
+    ; Box: rows 7-11, columns 25-55
+    
+    ; Top border
+    mov dh, 7
+    mov dl, 25
+    mov al, 0xC9        ; ╔
+    mov bl, 0x0F        ; White
+    call write_char
+    
+    mov dl, 26
+    mov cx, 28
+.draw_name_top:
+    mov al, 0xCD        ; ═
+    call write_char
+    inc dl
+    loop .draw_name_top
+    
+    mov dl, 54
+    mov al, 0xBB        ; ╗
+    call write_char
+    
+    ; Side borders (rows 8-10)
+    mov cx, 3
+    mov dh, 8
+.draw_name_sides:
+    mov dl, 25
+    mov al, 0xBA        ; ║
+    call write_char
+    mov dl, 54
+    call write_char
+    inc dh
+    loop .draw_name_sides
+    
+    ; Bottom border
+    mov dh, 11
+    mov dl, 25
+    mov al, 0xC8        ; ╚
+    call write_char
+    
+    mov dl, 26
+    mov cx, 28
+.draw_name_bottom:
+    mov al, 0xCD
+    call write_char
+    inc dl
+    loop .draw_name_bottom
+    
+    mov dl, 54
+    mov al, 0xBC        ; ╝
+    call write_char
+    
+    ; Print "Name:" label
+    mov dh, 8
+    mov dl, 28
+    mov si, prompt_name
+    mov bl, 0x0F
+    call print_string
+    
+    ; ===== DRAW ROLL NUMBER BOX (Centered at row 15) =====
+    ; Box: rows 14-18, columns 25-55
+    
+    ; Top border
+    mov dh, 14
+    mov dl, 25
+    mov al, 0xC9
+    mov bl, 0x0F
+    call write_char
+    
+    mov dl, 26
+    mov cx, 28
+.draw_roll_top:
+    mov al, 0xCD
+    call write_char
+    inc dl
+    loop .draw_roll_top
+    
+    mov dl, 54
+    mov al, 0xBB
+    call write_char
+    
+    ; Side borders (rows 15-17)
+    mov cx, 3
+    mov dh, 15
+.draw_roll_sides:
+    mov dl, 25
+    mov al, 0xBA
+    call write_char
+    mov dl, 54
+    call write_char
+    inc dh
+    loop .draw_roll_sides
+    
+    ; Bottom border
+    mov dh, 18
+    mov dl, 25
+    mov al, 0xC8
+    call write_char
+    
+    mov dl, 26
+    mov cx, 28
+.draw_roll_bottom:
+    mov al, 0xCD
+    call write_char
+    inc dl
+    loop .draw_roll_bottom
+    
+    mov dl, 54
+    mov al, 0xBC
+    call write_char
+    
+    ; Print "Roll Number:" label
+    mov dh, 15
+    mov dl, 28
+    mov si, prompt_roll
+    mov bl, 0x0F
+    call print_string
+    
+    ; Print instruction at bottom
+    mov dh, 22
+    mov dl, 28
+    mov si, input_instruction
+    mov bl, 0x0E        ; Yellow
+    call print_string
+    
+    ; ===== INPUT NAME =====
+    mov byte [name_length], 0
+    mov dh, 9           ; Input row for name
+    mov dl, 28          ; Input starting column
+    
+.input_name_loop:
+    ; Show cursor (blinking underscore)
+    push dx
+    movzx ax, byte [name_length]
+    add dl, al
+    mov al, '_'
+    mov bl, 0x0F
+    call write_char
+    pop dx
+    
+    ; Wait for key
+    mov ah, 0x00
+    int 0x16
+    
+    ; Check for ENTER
+    cmp al, 0x0D
+    je .name_done
+    
+    ; Check for BACKSPACE
+    cmp al, 0x08
+    jne .check_valid_name_char
+    
+    ; Handle backspace
+    cmp byte [name_length], 0
+    je .input_name_loop
+    
+    dec byte [name_length]
+    push dx
+    movzx ax, byte [name_length]
+    add dl, al
+    mov al, ' '
+    mov bl, 0x00
+    call write_char
+    inc dl
+    call write_char
+    pop dx
+    jmp .input_name_loop
+    
+.check_valid_name_char:
+    ; Only accept letters and spaces
+    cmp al, ' '
+    je .add_name_char
+    cmp al, 'A'
+    jb .input_name_loop
+    cmp al, 'z'
+    ja .input_name_loop
+    
+.add_name_char:
+    ; Check max length (20 chars)
+    cmp byte [name_length], 20
+    jae .input_name_loop
+    
+    ; Store character
+    movzx bx, byte [name_length]
+    mov [input_name + bx], al
+    
+    ; Display character
+    push dx
+    add dl, bl
+    mov bl, 0x0F
+    call write_char
+    pop dx
+    
+    inc byte [name_length]
+    jmp .input_name_loop
+    
+.name_done:
+    ; Clear cursor
+    push dx
+    movzx ax, byte [name_length]
+    add dl, al
+    mov al, ' '
+    mov bl, 0x00
+    call write_char
+    pop dx
+    
+    ; ===== INPUT ROLL NUMBER =====
+    mov byte [roll_length], 0
+    mov dh, 16          ; Input row for roll
+    mov dl, 28          ; Input starting column
+    
+.input_roll_loop:
+    ; Show cursor
+    push dx
+    movzx ax, byte [roll_length]
+    add dl, al
+    mov al, '_'
+    mov bl, 0x0F
+    call write_char
+    pop dx
+    
+    ; Wait for key
+    mov ah, 0x00
+    int 0x16
+    
+    ; Check for ENTER
+    cmp al, 0x0D
+    je .roll_done
+    
+    ; Check for BACKSPACE
+    cmp al, 0x08
+    jne .check_valid_roll_char
+    
+    ; Handle backspace
+    cmp byte [roll_length], 0
+    je .input_roll_loop
+    
+    dec byte [roll_length]
+    push dx
+    movzx ax, byte [roll_length]
+    add dl, al
+    mov al, ' '
+    mov bl, 0x00
+    call write_char
+    inc dl
+    call write_char
+    pop dx
+    jmp .input_roll_loop
+    
+.check_valid_roll_char:
+    ; Only accept numbers and letters
+    cmp al, '0'
+    jb .input_roll_loop
+    cmp al, '9'
+    jbe .add_roll_char
+    cmp al, 'A'
+    jb .input_roll_loop
+    cmp al, 'z'
+    ja .input_roll_loop
+    
+.add_roll_char:
+    ; Check max length (10 chars)
+    cmp byte [roll_length], 10
+    jae .input_roll_loop
+    
+    ; Store character
+    movzx bx, byte [roll_length]
+    mov [input_roll + bx], al
+    
+    ; Display character
+    push dx
+    add dl, bl
+    mov bl, 0x0F
+    call write_char
+    pop dx
+    
+    inc byte [roll_length]
+    jmp .input_roll_loop
+    
+.roll_done:
+    ; Clear cursor
+    push dx
+    movzx ax, byte [roll_length]
+    add dl, al
+    mov al, ' '
+    mov bl, 0x00
+    call write_char
+    pop dx
+    mov word [fuel_timer], 0     ; Reset fuel timer to start fresh
+
+    
+    popa
+	call unhook_timer
+	call hook_timer
+	call set_game
+	push 0x0720
+    call clrscr
+    ret
+;==================== END INPUT SCREEN ====================
 	
 ; ========== MAIN PROGRAM ==========
 start:
-	 ; Your existing initialization
-    call hook_kbisr
-    call hook_timer
-    
-    ; START MULTITASKING - Add this line!
-    call setupMultitasking
     call screen1
-
+    call instructions_page
+    call input_screen
 game:
-	
-	push 0x0720
-    call clrscr
-    ;call drawBg
     call scrollbg  
     call screenEnd
 	cmp byte[replay],1
@@ -4461,11 +4808,6 @@ game:
 	call set_game
 	jmp game
 endGame:
-	push 0x0720
-	call clrscr
-	mov byte [musicEnabled], 0
-    call unhook_timer        ; Your existing code
-    push 0x0720
-    call clrscr
+	call clear_game
     mov ax, 0x4c00
     int 0x21
