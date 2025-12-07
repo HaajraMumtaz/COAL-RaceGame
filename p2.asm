@@ -262,38 +262,77 @@ musicEnabled: db 1          ; Set to 0 to disable music
 
 
 ; ===================================================================
-; MUSIC DATA
+; MUSIC DATA (Corrected Structure)
 ; ===================================================================
-; Engine sound frequencies - smooth transitions
-ENGINE_IDLE     equ 200      ; Low rumble (idle engine)
-ENGINE_LOW      equ 250      ; Low speed
-ENGINE_MID      equ 350      ; Mid speed
-ENGINE_HIGH     equ 500      ; High speed
-ENGINE_REV      equ 700      ; Revving
-NOTE_REST       equ 0
+NOTE_C3  EQU 130
+NOTE_E3  EQU 165
+NOTE_G3  EQU 196
+NOTE_A3  EQU 220
+NOTE_B3  EQU 247
+NOTE_C4  EQU 261
+NOTE_E4  EQU 329
+NOTE_G4  EQU 392
+NOTE_A4  EQU 440
+NOTE_D5  EQU 587
 
-; Smooth engine loop - sounds like continuous car driving
+LEN_TINY  EQU 2   
+LEN_SHORT EQU 4   
+LEN_MED   EQU 8   
+
+NOTE_REST EQU 0
+
 melody:
-	; --- Frequency Definitions (in Hz) ---
-	NOTE_C2  EQU 65
-	NOTE_E2  EQU 82
-	NOTE_G2  EQU 98
-	NOTE_A2  EQU 110
-	NOTE_C3  EQU 130
-	NOTE_E3  EQU 165
-	NOTE_G3  EQU 196
-	NOTE_B3  EQU 247
-	NOTE_C4  EQU 261
-	NOTE_D4  EQU 293
-	NOTE_E4  EQU 329
-	NOTE_G4  EQU 392
+    ; ------------------------------------------------
+    ; PHASE 1: THE INTRO (Played once)
+    ; ------------------------------------------------
+    dw NOTE_E3, LEN_SHORT
+    dw NOTE_E3, LEN_SHORT
+    dw NOTE_A3, LEN_MED
+    dw NOTE_REST, LEN_TINY
+    
+    dw NOTE_G3, LEN_SHORT
+    dw NOTE_A3, LEN_SHORT
+    dw NOTE_C4, LEN_MED
+    dw NOTE_REST, LEN_TINY
+    
+    dw NOTE_C4, LEN_SHORT
+    dw NOTE_E4, LEN_SHORT
+    dw NOTE_G4, LEN_SHORT
+    dw NOTE_E4, LEN_SHORT
 
-	; --- Duration Constants (Adjust based on your playback speed) ---
-	LEN_TINY EQU 3   ; Very fast (engine flutter)
-	LEN_SHORT EQU 6  ; Fast notes
-	LEN_MED   EQU 12 ; Standard beat
-	LEN_LONG  EQU 24 ; Sustained notes
-    dw 0xFFFF                ; Loop back
+    ; ------------------------------------------------
+    ; PHASE 2: THE LOOP (The driving beat)
+    ; ------------------------------------------------
+melody_loop_point:  ; <--- Logic will jump back here
+
+    ; -- Pattern A (Low Rumble) --
+    dw NOTE_E3, LEN_SHORT
+    dw NOTE_E3, LEN_SHORT
+    dw NOTE_A3, LEN_SHORT
+    dw NOTE_G3, LEN_SHORT
+
+    ; -- Pattern B (High Flutter) --
+    dw NOTE_E4, LEN_TINY
+    dw NOTE_D5, LEN_TINY
+    dw NOTE_E4, LEN_TINY
+    dw NOTE_B3, LEN_TINY
+    
+    ; -- Pattern C (The Drive) --
+    dw NOTE_C4, LEN_SHORT
+    dw NOTE_A3, LEN_SHORT
+    dw NOTE_G3, LEN_SHORT
+    dw NOTE_E3, LEN_SHORT
+
+    ; -- Pattern D (Turnaround) --
+    dw NOTE_E3, LEN_SHORT
+    dw NOTE_E3, LEN_TINY
+    dw NOTE_G3, LEN_TINY
+    dw NOTE_A3, LEN_SHORT
+
+    ; ------------------------------------------------
+    ; END MARKER
+    ; ------------------------------------------------
+    dw 0xFFFF  ; Logic detects this and jumps to melody_loop_point
 noteIndex: dw 0
 noteTimer: dw 0
 ;------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -825,6 +864,45 @@ check:
 ; ===================================================================
 ; MUSIC TASK - Runs in background
 ; ===================================================================
+
+reset_music_task:
+    ; 1. Reset variables
+    mov word [noteIndex], 0
+    mov word [noteTimer], 1
+    mov byte [musicEnabled], 1
+    mov byte [currentTask], 0      ; Ensure we start as Main Task
+    
+    ; 2. Reset Music Stack Pointer to the very top
+    mov ax, musicStackEnd
+    mov [musicTask.sp], ax
+
+    ; 3. Manually rebuild the initial stack frame for the Music Task
+    ;    (This mimics what 'setupMultitasking' did originally)
+    
+    ; We need to temporarily switch to the music stack to push initial values
+    mov bx, ss          ; Save current SS
+    mov cx, sp          ; Save current SP
+    
+    mov ax, cs
+    mov ss, ax
+    mov sp, musicStackEnd
+    
+    ; Push Initial State for iret/retf
+    pushf               ; Push Flags
+    push cs             ; Push Code Segment
+    push word musicProcess ; Push Instruction Pointer (Start of function)
+    
+    ; Save this new SP into the Task Control Block
+    mov [musicTask.sp], sp
+    
+    ; Restore the Main Stack
+    mov ss, bx
+    mov sp, cx
+    
+    ret
+; ===================================================================
+; MUSIC TASK - SAFER LOOPING LOGIC
+; ===================================================================
 musicProcess:
     mov ax, cs
     mov ds, ax
@@ -839,13 +917,17 @@ musicProcess:
     mov bx, [noteIndex]
     mov ax, [melody + bx]
     
+    ; --- CHECK FOR END OF SONG (0xFFFF) ---
     cmp ax, 0xFFFF
-    jne .notEnd
-    xor bx, bx
-    mov [noteIndex], bx
-    mov ax, [melody + bx]
+    jne .play
     
-.notEnd:
+    ; If we hit end, DO NOT reset to 0. 
+    ; Reset to the 'melody_loop_point' offset instead.
+    mov bx, (melody_loop_point - melody) 
+    mov [noteIndex], bx
+    jmp .loop             ; Restart immediately from loop point
+    
+.play:
     cmp ax, NOTE_REST
     je .rest
     call playTone
@@ -855,13 +937,17 @@ musicProcess:
     call stopTone
     
 .setDuration:
+    ; Read duration
     mov ax, [melody + bx + 2]
     mov [noteTimer], ax
+    
+    ; Move to next note (4 bytes)
     add bx, 4
     mov [noteIndex], bx
     
 .wait:
-    mov cx, 0x1000
+    ; Speed control (Higher = Slower song)
+    mov cx, 0x4000      
 .delay:
     loop .delay
     jmp .loop
@@ -869,6 +955,18 @@ musicProcess:
 .exit:
     call stopTone
     jmp $
+	
+stopTone:
+    push ax
+    
+    in al, 0x61         ; Read current status of port 61h
+    and al, 0xFC        ; Clear bits 0 and 1 (1111 1100 in binary)
+                        ; Bit 0 = Speaker Gate
+                        ; Bit 1 = PIT Channel 2 Gate
+    out 0x61, al        ; Write back to port 61h to turn off speaker
+    
+    pop ax
+    ret
 ; HOOK FUNCTIONS
 ; ===================================================================
 hook_kbisr:
@@ -948,7 +1046,7 @@ unhook_timer:
     mov [es:8*4], ax
     mov [es:8*4+2], bx
     sti
-    
+    call reset_music_task
     pop bx
     pop ax
     pop es
@@ -1042,32 +1140,39 @@ print_string:
 playTone:
     push ax
     push bx
+    push dx
     
-    mov bx, ax
-    mov al, 0xB6
+    cmp ax, 0           
+    je .exit_tone
+
+    mov bx, ax          ; BX = Frequency
+    
+    ; Calculate 1,193,180 / Frequency
+    mov dx, 0x0012      
+    mov ax, 0x34DC      
+    div bx              ; AX = Resulting Divisor
+    
+    mov bx, ax          
+
+    ; Send to PIT
+    mov al, 0xB6        
     out 0x43, al
     
-    mov ax, bx
-    out 0x42, al
+    mov ax, bx          
+    out 0x42, al        
     mov al, ah
-    out 0x42, al
+    out 0x42, al        
     
-    in al, 0x61
-    or al, 0x03
+    ; Turn Speaker ON
+    in al, 0x61         
+    or al, 0x03         
     out 0x61, al
     
+.exit_tone:
+    pop dx
     pop bx
     pop ax
     ret
-
-stopTone:
-    push ax
-    in al, 0x61
-    and al, 0xFC
-    out 0x61, al
-    pop ax
-    ret
-
 
 
 
@@ -1129,10 +1234,9 @@ set_game:
 	clear_game:
 		push 0x0720
 		call clrscr
-		mov byte [musicEnabled], 0
-		call unhook_timer        ; Your existing code
 		push 0x0720
 		call clrscr
+
 	ret
 	;----------------------------------------------------------------------------------First Screen----------------------------------------------------------------------------------------------------------
 ;------------maun func-------------
@@ -4157,7 +4261,7 @@ screenEndprep:
     push bp
     mov bp, sp
     push ax
-    
+    call unhook_timer
     ; Row 0-2: empty rows with curtain effect
     mov al, 0
     call fill_row
